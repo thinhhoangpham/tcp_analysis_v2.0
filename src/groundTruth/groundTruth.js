@@ -2,6 +2,7 @@
 // Ground truth event data handling
 
 import { utcToEpochMicroseconds, epochMicrosecondsToUTC } from '../utils/formatters.js';
+import { SUB_ROW_HEIGHT, SUB_ROW_GAP } from '../config/constants.js';
 
 /**
  * Load ground truth data from CSV file.
@@ -71,29 +72,22 @@ export function filterGroundTruthByIPs(groundTruthData, selectedIPs) {
  * @returns {{y: number, height: number, pairIndex: number}}
  */
 function computeSubRowBox(ip, baseY, pairKey, subRowLayout) {
-    const defaultHeight = 20;
-    const SUB_ROW_GAP = 2;
-
     if (!subRowLayout) {
-        return { y: baseY - defaultHeight / 2, height: defaultHeight, pairIndex: -1 };
+        return { y: baseY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex: -1 };
     }
 
-    const { ipPairOrderByRow, ipRowHeights, rowGap } = subRowLayout;
+    const { ipPairOrderByRow } = subRowLayout;
     const pairInfo = ipPairOrderByRow && ipPairOrderByRow.get(baseY);
 
     if (!pairInfo || pairInfo.count <= 1) {
-        return { y: baseY - defaultHeight / 2, height: defaultHeight, pairIndex: -1 };
+        return { y: baseY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex: -1 };
     }
 
     // Row is expanded — find the specific sub-row for this IP pair
     const pairIndex = pairInfo.order.has(pairKey) ? pairInfo.order.get(pairKey) : 0;
-    const rh = (ipRowHeights && ipRowHeights.get(ip)) || rowGap || 30;
-    const availableHeight = Math.max(20, rh - 6);
-    const totalGaps = Math.max(0, pairInfo.count - 1) * SUB_ROW_GAP;
-    const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairInfo.count);
-    const centerY = baseY + pairIndex * (subRowHeight + SUB_ROW_GAP);
+    const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
 
-    return { y: centerY - subRowHeight / 2, height: subRowHeight, pairIndex };
+    return { y: centerY - SUB_ROW_HEIGHT / 2, height: SUB_ROW_HEIGHT, pairIndex };
 }
 
 /**

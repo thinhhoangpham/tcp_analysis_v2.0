@@ -2,6 +2,7 @@
 // Circle rendering for packet visualization
 
 import { getFlagType } from '../tcp/flags.js';
+import { SUB_ROW_HEIGHT, SUB_ROW_GAP } from '../config/constants.js';
 
 /**
  * Build an index of bins grouped by src_ip for fast parent/child lookup.
@@ -129,10 +130,6 @@ export function renderCircles(layer, binned, options) {
         }
     }
 
-    // Layout constants
-    const DEFAULT_ROW_HEIGHT = ROW_GAP || 30;
-    const SUB_ROW_GAP = 2; // Gap between sub-rows
-
     // Helper function to calculate y position with offset for an IP pair on a given row
     const calculateYPosWithOffset = (ip, ipPairKey) => {
         const baseY = ipPositions.get(ip);
@@ -140,14 +137,8 @@ export function renderCircles(layer, binned, options) {
 
         const pairInfo = ipPairOrderByRow.get(baseY) || { order: new Map(), count: 1 };
         const pairIndex = pairInfo.order.get(ipPairKey) || 0;
-        const pairCount = pairInfo.count;
 
-        const rowHeight = (ipRowHeights && ipRowHeights.get(ip)) || DEFAULT_ROW_HEIGHT;
-        const availableHeight = Math.max(20, rowHeight - 6);
-        const totalGaps = Math.max(0, pairCount - 1) * SUB_ROW_GAP;
-        const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairCount);
-
-        return baseY + pairIndex * (subRowHeight + SUB_ROW_GAP);
+        return baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
     };
 
     // Ensure each item has yPos and calculate offset
@@ -157,19 +148,10 @@ export function renderCircles(layer, binned, options) {
         const ipPairKey = d.ipPairKey === '__collapsed__' ? '__collapsed__' : makeIpPairKey(d.src_ip, d.dst_ip);
         const pairInfo = ipPairOrderByRow.get(yPos) || { order: new Map(), count: 1 };
         const pairIndex = pairInfo.order.get(ipPairKey) || 0;
-        const pairCount = pairInfo.count;
-
-        // Get this IP's row height (dynamic per-IP)
-        const rowHeight = (ipRowHeights && ipRowHeights.get(d.src_ip)) || DEFAULT_ROW_HEIGHT;
-        const availableHeight = Math.max(20, rowHeight - 6);
-
-        // Calculate sub-row height based on how many pairs share this row
-        const totalGaps = Math.max(0, pairCount - 1) * SUB_ROW_GAP;
-        const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairCount);
 
         // First pair (pairIndex 0) aligns with baseline (yPos) where label is
         // Subsequent pairs grow DOWNWARD from there
-        const pairCenterY = yPos + pairIndex * (subRowHeight + SUB_ROW_GAP);
+        const pairCenterY = yPos + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
 
         return {
             ...d,
@@ -201,20 +183,16 @@ export function renderCircles(layer, binned, options) {
             });
             // Determine available spread range (collapse-aware)
             const sample = group[0];
-            const ip = sample.src_ip;
-            const rowHeight = (ipRowHeights && ipRowHeights.get(ip)) || DEFAULT_ROW_HEIGHT;
-            const availableHeight = Math.max(20, rowHeight - 6);
             let spreadRange;
             if (sample.ipPairKey === '__collapsed__') {
-                // Collapsed: full row height is available
-                spreadRange = availableHeight;
+                // Collapsed: use the full row height
+                const ip = sample.src_ip;
+                const rowHeight = (ipRowHeights && ipRowHeights.get(ip)) || (ROW_GAP || 30);
+                spreadRange = Math.max(20, rowHeight - 6);
             } else {
-                // Expanded: only this pair's sub-row slice
-                const baseY = sample.yPos;
-                const pairInfo = ipPairOrderByRow.get(baseY) || { count: 1 };
-                const pairCount = pairInfo.count;
-                const totalGaps = Math.max(0, pairCount - 1) * SUB_ROW_GAP;
-                spreadRange = Math.max(4, (availableHeight - totalGaps) / pairCount);
+                // Expanded: fixed sub-row height (doubled when separateFlags is on,
+                // since ipPositioning already allocated double height)
+                spreadRange = separateFlags ? SUB_ROW_HEIGHT * 2 : SUB_ROW_HEIGHT;
             }
             const n = group.length;
             // Step: fit within spread range, capped so circles don't crowd.

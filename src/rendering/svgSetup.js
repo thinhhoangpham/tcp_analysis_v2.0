@@ -1,6 +1,8 @@
 // src/rendering/svgSetup.js
 // SVG container and layer creation for TimeArcs visualization
 
+import { SUB_ROW_HEIGHT, SUB_ROW_GAP } from '../config/constants.js';
+
 /**
  * Create the main SVG structure with layers for rendering.
  *
@@ -303,8 +305,6 @@ export function renderIPRowLabels(options) {
 
     // Add sub-row hover targets and highlight rects for expanded IPs
     if (ipPairOrderByRow && ipRowHeights && ipPairCounts) {
-        const SUB_ROW_GAP = 2;
-
         // Sub-row highlight rects (behind everything in highlightGroup).
         // They double as hover targets: pointer-events: all so they catch
         // mouse events in empty space, but data circles on top get events first.
@@ -318,24 +318,19 @@ export function renderIPRowLabels(options) {
             const pairInfo = ipPairOrderByRow.get(baseY);
             if (!pairInfo || pairInfo.count <= 1) return;
 
-            const rh = ipRowHeights.get(ip) || rowHeight;
-            const availableHeight = Math.max(20, rh - 6);
-            const totalGaps = Math.max(0, pairInfo.count - 1) * SUB_ROW_GAP;
-            const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairInfo.count);
-
             for (const [pairKey, pairIndex] of pairInfo.order) {
                 const parts = pairKey.split('<->');
                 const partnerIp = parts[0] === ip ? parts[1] : parts[0];
-                const centerY = baseY + pairIndex * (subRowHeight + SUB_ROW_GAP);
+                const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
 
                 // Visual highlight rect spans full chart width (no pointer events)
                 highlightGroup.append('rect')
                     .attr('class', 'sub-row-highlight')
                     .datum({ ip, partnerIp, pairKey, pairIndex })
                     .attr('x', -150)
-                    .attr('y', centerY - subRowHeight / 2)
+                    .attr('y', centerY - SUB_ROW_HEIGHT / 2)
                     .attr('width', chartWidth + 150)
-                    .attr('height', subRowHeight)
+                    .attr('height', SUB_ROW_HEIGHT)
                     .style('fill', '#4dabf7')
                     .style('opacity', 0);
 
@@ -346,9 +341,9 @@ export function renderIPRowLabels(options) {
                         .attr('class', 'sub-row-hover-target')
                         .datum({ ip, partnerIp, pairKey, pairIndex })
                         .attr('x', -150)
-                        .attr('y', centerY - subRowHeight / 2)
+                        .attr('y', centerY - SUB_ROW_HEIGHT / 2)
                         .attr('width', 150)
-                        .attr('height', subRowHeight)
+                        .attr('height', SUB_ROW_HEIGHT)
                         .style('fill', 'transparent')
                         .style('pointer-events', 'all')
                         .on('mouseover', function() {

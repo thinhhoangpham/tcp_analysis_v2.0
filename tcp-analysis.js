@@ -6,6 +6,7 @@ import { initOverview, createOverviewChart, createOverviewFromAdaptive, createFl
 import { FLOW_RECONSTRUCT_BATCH } from './config.js';
 import {
     DEBUG, RADIUS_MIN, RADIUS_MAX, ROW_GAP, TOP_PAD,
+    SUB_ROW_HEIGHT, SUB_ROW_GAP,
     TCP_STATES, HANDSHAKE_TIMEOUT_MS, REORDER_WINDOW_PKTS, REORDER_WINDOW_MS,
     DEFAULT_FLAG_COLORS, FLAG_CURVATURE, PROTOCOL_MAP,
     DEFAULT_FLOW_COLORS, DEFAULT_EVENT_COLORS
@@ -231,6 +232,15 @@ let globalMaxBinCount = 1;
 
 // useBinning and renderMode moved to state.ui (Phase 2)
 
+// --- Box selection state ---
+const boxSelections = [];           // Persistent selection objects
+let boxSelectionIdCounter = 0;      // Auto-increment ID
+let boxSelectionsGroup = null;      // SVG <g> for selection visuals (child of mainGroup)
+let boxDragStart = null;            // [x, y] in mainGroup coords, or null
+let isBoxDragging = false;          // True after drag threshold exceeded
+const BOX_DRAG_THRESHOLD = 8;       // Pixels before drag activates
+const BOX_SELECTION_COLOR = '#555';  // Dark grey for all selections
+
 // Consolidated state object for better organization
 const state = {
     // Phase 1: Flow Detail Mode (isolated, ~20 refs)
@@ -252,7 +262,8 @@ const state = {
         renderMode: 'circles',   // Render mode (circles only)
         separateFlags: false,    // Spread overlapping flag circles vertically
         showSubRowArcs: false,   // Show permanent ghost arcs for IP pair sub-rows
-        showFlowThreading: true  // Auto-draw flow threading arcs at raw resolution
+        showFlowThreading: true, // Auto-draw flow threading arcs at raw resolution
+        enableBoxSelection: false // Shift+drag box selection mode for packet export
     },
 
     // Phase 3: TimeArcs Integration (isolated, ~50 refs)
@@ -544,11 +555,7 @@ function getIPYWithSubRowOffset(ip, srcIp, dstIp) {
     const pairInfo = state.layout.ipPairOrderByRow.get(baseY);
     if (!pairInfo || pairInfo.count <= 1) return baseY;
     const pairIndex = pairInfo.order.get(pairKey) || 0;
-    const rh = (state.layout.ipRowHeights && state.layout.ipRowHeights.get(ip)) || ROW_GAP;
-    const availableHeight = Math.max(20, rh - 6);
-    const totalGaps = Math.max(0, pairInfo.count - 1) * 2;
-    const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairInfo.count);
-    return baseY + pairIndex * (subRowHeight + 2);
+    return baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
 }
 
 /**
@@ -610,22 +617,15 @@ function lookupCircleY(circlePosMap, time, srcIp, dstIp, flagType) {
  * Called after any position recalculation (collapse adjustment, drag reorder).
  */
 function syncSubRowHighlights(svgEl, st) {
-    const SUB_ROW_GAP = 2;
     svgEl.selectAll('.sub-row-highlight, .sub-row-hover-target').each(function() {
         const rect = d3.select(this);
         const d = rect.datum();
         if (!d || !d.ip) return;
         const baseY = st.layout.ipPositions.get(d.ip);
         if (baseY === undefined) return;
-        const rh = (st.layout.ipRowHeights && st.layout.ipRowHeights.get(d.ip)) || ROW_GAP;
-        const pairInfo = st.layout.ipPairOrderByRow.get(baseY);
-        if (!pairInfo) return;
-        const availableHeight = Math.max(20, rh - 6);
-        const totalGaps = Math.max(0, pairInfo.count - 1) * SUB_ROW_GAP;
-        const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairInfo.count);
-        const centerY = baseY + d.pairIndex * (subRowHeight + SUB_ROW_GAP);
-        rect.attr('y', centerY - subRowHeight / 2)
-            .attr('height', subRowHeight);
+        const centerY = baseY + d.pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+        rect.attr('y', centerY - SUB_ROW_HEIGHT / 2)
+            .attr('height', SUB_ROW_HEIGHT);
     });
 }
 
@@ -896,6 +896,13 @@ function initializeBarVisualization() {
                 // Turning on while already at raw resolution — draw immediately
                 const visible = getVisiblePackets(state.data.filtered, xScale);
                 drawAutoFlowThreading(visible);
+            }
+        },
+        onToggleBoxSelection: (checked) => {
+            state.ui.enableBoxSelection = checked;
+            if (mainGroup) {
+                mainGroup.select('.box-select-overlay')
+                    .style('pointer-events', checked ? 'all' : 'none');
             }
         },
         onToggleBinning: (checked) => {
@@ -4017,6 +4024,438 @@ function clearAutoFlowThreading() {
     mainGroup.selectAll('.flow-threading-arcs').remove();
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Box Selection — Shift+drag to select IP pair packets for CSV export
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Setup Shift+drag event handlers on the SVG for box selection.
+ * Called once after SVG creation inside visualizeTimeArcs.
+ */
+function setupBoxSelectionDrag() {
+    if (!svg || !mainGroup) return;
+
+    // Overlay first (below in stacking order) — captures drag for new selections.
+    // Selections group second (above) — so buttons are clickable on top of overlay.
+    mainGroup.append('rect')
+        .attr('class', 'box-select-overlay')
+        .attr('x', -200).attr('y', -100)
+        .attr('width', 9999).attr('height', 9999)
+        .style('fill', 'none')
+        .style('pointer-events', state.ui.enableBoxSelection ? 'all' : 'none')
+        .style('cursor', 'text');
+
+    const overlay = mainGroup.select('.box-select-overlay');
+
+    // Selections group on top of overlay so buttons are clickable
+    boxSelectionsGroup = mainGroup.append('g')
+        .attr('class', 'box-selections-group')
+        .style('pointer-events', 'none');
+
+    // Drag state
+    let boxDragRowInfo = null;
+
+    overlay.on('mousedown', (event) => {
+        if (!state.ui.enableBoxSelection) return;
+        if (event.button !== 0) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        boxDragStart = d3.pointer(event, mainGroup.node());
+        isBoxDragging = false;
+        boxDragRowInfo = detectIPRowFromY(boxDragStart[1]);
+    });
+
+    overlay.on('mousemove', (event) => {
+        if (!boxDragStart || !state.ui.enableBoxSelection) return;
+        const current = d3.pointer(event, mainGroup.node());
+        const dist = Math.abs(current[0] - boxDragStart[0]);
+        if (!isBoxDragging && dist > BOX_DRAG_THRESHOLD) {
+            isBoxDragging = true;
+        }
+        if (isBoxDragging) {
+            event.preventDefault();
+            event.stopPropagation();
+            drawBoxSelectionPreview(boxDragStart, current, boxDragRowInfo);
+        }
+    });
+
+    overlay.on('mouseup', (event) => {
+        if (!isBoxDragging || !boxDragStart || !state.ui.enableBoxSelection) {
+            boxDragStart = null;
+            isBoxDragging = false;
+            boxDragRowInfo = null;
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const current = d3.pointer(event, mainGroup.node());
+        finalizeBoxSelection(boxDragStart, current, boxDragRowInfo);
+        clearBoxSelectionPreview();
+        boxDragStart = null;
+        isBoxDragging = false;
+        boxDragRowInfo = null;
+    });
+
+    overlay.on('mouseleave', () => {
+        if (isBoxDragging) clearBoxSelectionPreview();
+        boxDragStart = null;
+        isBoxDragging = false;
+        boxDragRowInfo = null;
+    });
+}
+
+/** Draw live rubber-band rectangle during drag, snapped to detected row height. */
+function drawBoxSelectionPreview(start, current, rowInfo) {
+    if (!boxSelectionsGroup) return;
+    boxSelectionsGroup.selectAll('.box-selection-preview').remove();
+    if (!rowInfo) return;
+
+    const x0 = Math.min(start[0], current[0]);
+    const x1 = Math.max(start[0], current[0]);
+
+    // Snap to row bounds
+    const bounds = rowInfo.isCollapsed || !rowInfo.pairKey
+        ? computeSubRowBounds(rowInfo.ip, null)
+        : computeSubRowBounds(rowInfo.ip, rowInfo.pairKey);
+    if (!bounds) return;
+
+    boxSelectionsGroup.append('rect')
+        .attr('class', 'box-selection-preview')
+        .attr('x', x0).attr('y', bounds.boxY)
+        .attr('width', x1 - x0).attr('height', Math.max(1, bounds.boxH))
+        .style('fill', BOX_SELECTION_COLOR).style('fill-opacity', 0.1)
+        .style('stroke', BOX_SELECTION_COLOR).style('stroke-width', 2)
+        .style('stroke-dasharray', '5,5')
+        .style('pointer-events', 'none');
+}
+
+function clearBoxSelectionPreview() {
+    if (boxSelectionsGroup) boxSelectionsGroup.selectAll('.box-selection-preview').remove();
+}
+
+/**
+ * Detect which IP row and sub-row a Y coordinate falls into.
+ * Returns { ip, pairKey, partnerIP, pairIndex, isCollapsed } or null.
+ */
+function detectIPRowFromY(y) {
+    if (!state.layout.ipPositions || state.layout.ipPositions.size === 0) return null;
+
+    // Find the IP whose row contains this Y coordinate
+    let bestIP = null;
+    let bestDist = Infinity;
+    for (const [ip, yPos] of state.layout.ipPositions) {
+        const rowH = (state.layout.ipRowHeights && state.layout.ipRowHeights.get(ip)) || ROW_GAP;
+        if (y >= yPos - ROW_GAP / 2 && y < yPos + rowH) {
+            bestIP = ip;
+            bestDist = 0;
+            break;
+        }
+        const dist = Math.abs(y - yPos);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIP = ip;
+        }
+    }
+    if (!bestIP) return null;
+
+    const baseY = state.layout.ipPositions.get(bestIP);
+    const isCollapsed = state.layout.collapsedIPs.has(bestIP);
+    const pairCount = (state.layout.ipPairCounts && state.layout.ipPairCounts.get(bestIP)) || 1;
+
+    // Collapsed or single pair → whole row
+    if (isCollapsed || pairCount <= 1) {
+        return { ip: bestIP, pairKey: null, partnerIP: null, pairIndex: 0, isCollapsed: true };
+    }
+
+    // Expanded: determine which sub-row
+    const pairInfo = state.layout.ipPairOrderByRow.get(baseY);
+    if (!pairInfo || pairInfo.count <= 1) {
+        return { ip: bestIP, pairKey: null, partnerIP: null, pairIndex: 0, isCollapsed: true };
+    }
+
+    let bestPairKey = null, bestPartnerIP = null, bestPairIndex = 0, bestSubDist = Infinity;
+    for (const [pairKey, pairIndex] of pairInfo.order) {
+        const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+        const dist = Math.abs(y - centerY);
+        if (dist < bestSubDist) {
+            bestSubDist = dist;
+            bestPairKey = pairKey;
+            bestPairIndex = pairIndex;
+            const parts = pairKey.split('<->');
+            bestPartnerIP = parts[0] === bestIP ? parts[1] : parts[0];
+        }
+    }
+
+    return { ip: bestIP, pairKey: bestPairKey, partnerIP: bestPartnerIP, pairIndex: bestPairIndex, isCollapsed: false };
+}
+
+/** Get all IP pair keys for a source IP. */
+function getAllPairsForIP(ip) {
+    const baseY = state.layout.ipPositions.get(ip);
+    if (baseY === undefined) return [];
+    const pairInfo = state.layout.ipPairOrderByRow.get(baseY);
+    if (!pairInfo) return [];
+    return Array.from(pairInfo.order.keys());
+}
+
+/**
+ * Finalize a box selection drag: use pre-detected IP row, create paired boxes, store selection.
+ */
+function finalizeBoxSelection(start, end, rowInfo) {
+    if (!xScale || !state.layout.ipPositions || !rowInfo) return;
+    const x0 = Math.min(start[0], end[0]);
+    const x1 = Math.max(start[0], end[0]);
+
+    // Convert pixel X to time domain
+    const timeStart = xScale.invert(x0);
+    const timeEnd = xScale.invert(x1);
+
+    const info = rowInfo;
+
+    const id = ++boxSelectionIdCounter;
+    const color = BOX_SELECTION_COLOR;
+
+    const selection = {
+        id,
+        color,
+        timeRange: { start: timeStart, end: timeEnd },
+        sourceIP: info.ip,
+        partnerIP: info.partnerIP,
+        pairKey: info.pairKey,
+        pairIndex: info.pairIndex,
+        isCollapsed: info.isCollapsed,
+        allPairs: info.isCollapsed ? getAllPairsForIP(info.ip) : (info.pairKey ? [info.pairKey] : [])
+    };
+
+    boxSelections.push(selection);
+    createBoxSelectionVisual(selection);
+}
+
+/**
+ * Compute sub-row bounds for a given IP and pair key.
+ * Returns { boxY, boxH } or null.
+ */
+function computeSubRowBounds(ip, pairKey) {
+    const baseY = state.layout.ipPositions.get(ip);
+    if (baseY === undefined) return null;
+
+    if (!pairKey) {
+        // Full row
+        const rowH = (state.layout.ipRowHeights && state.layout.ipRowHeights.get(ip)) || ROW_GAP;
+        return { boxY: baseY - ROW_GAP / 4, boxH: rowH };
+    }
+
+    const pairInfo = state.layout.ipPairOrderByRow.get(baseY);
+    if (!pairInfo) return null;
+
+    const pairIndex = pairInfo.order.get(pairKey);
+    if (pairIndex === undefined) return null;
+    const centerY = baseY + pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
+    return { boxY: centerY - SUB_ROW_HEIGHT / 2, boxH: SUB_ROW_HEIGHT };
+}
+
+/**
+ * Draw persistent selection visuals: source box, paired destination box, label, buttons.
+ */
+function createBoxSelectionVisual(selection) {
+    if (!boxSelectionsGroup || !xScale) return;
+    const { id, color, timeRange, sourceIP, partnerIP, pairKey, isCollapsed } = selection;
+
+    const x0 = xScale(timeRange.start);
+    const x1 = xScale(timeRange.end);
+    const rectW = Math.max(1, x1 - x0);
+
+    // Source IP box
+    const srcBounds = isCollapsed || !pairKey
+        ? computeSubRowBounds(sourceIP, null)
+        : computeSubRowBounds(sourceIP, pairKey);
+    if (!srcBounds) return;
+
+    const selGroup = boxSelectionsGroup.append('g')
+        .attr('class', `persistent-box-selection box-selection-${id}`)
+        .attr('data-selection-id', id);
+
+    // Source rectangle
+    selGroup.append('rect').attr('class', 'box-sel-rect box-sel-src')
+        .attr('x', x0).attr('y', srcBounds.boxY)
+        .attr('width', rectW).attr('height', Math.max(1, srcBounds.boxH))
+        .style('fill', color).style('fill-opacity', 0.12)
+        .style('stroke', color).style('stroke-width', 2).style('stroke-dasharray', '5,5');
+
+    // Paired destination boxes
+    if (isCollapsed && selection.allPairs && selection.allPairs.length > 0) {
+        // Collapsed: draw a box on each partner IP's row
+        const drawnPartners = new Set();
+        for (const pk of selection.allPairs) {
+            const parts = pk.split('<->');
+            const partner = parts[0] === sourceIP ? parts[1] : parts[0];
+            if (drawnPartners.has(partner)) continue;
+            drawnPartners.add(partner);
+            const dstBounds = computeSubRowBounds(partner, null);
+            if (dstBounds) {
+                selGroup.append('rect').attr('class', 'box-sel-rect box-sel-dst')
+                    .attr('x', x0).attr('y', dstBounds.boxY)
+                    .attr('width', rectW).attr('height', Math.max(1, dstBounds.boxH))
+                    .style('fill', color).style('fill-opacity', 0.08)
+                    .style('stroke', color).style('stroke-width', 1.5).style('stroke-dasharray', '3,3');
+            }
+        }
+    } else if (!isCollapsed && partnerIP && pairKey) {
+        // Expanded: single paired box on the partner's sub-row
+        const dstBounds = computeSubRowBounds(partnerIP, pairKey);
+        if (dstBounds) {
+            selGroup.append('rect').attr('class', 'box-sel-rect box-sel-dst')
+                .attr('x', x0).attr('y', dstBounds.boxY)
+                .attr('width', rectW).attr('height', Math.max(1, dstBounds.boxH))
+                .style('fill', color).style('fill-opacity', 0.08)
+                .style('stroke', color).style('stroke-width', 1.5).style('stroke-dasharray', '3,3');
+        }
+    }
+
+    // Label
+    const pairLabel = isCollapsed
+        ? `${sourceIP} (all pairs)`
+        : (partnerIP ? `${sourceIP} ↔ ${partnerIP}` : sourceIP);
+    selGroup.append('text').attr('class', 'box-sel-label')
+        .attr('x', x0 + 5).attr('y', srcBounds.boxY - 3)
+        .style('font-size', '10px').style('font-weight', '600').style('fill', color)
+        .text(`#${id}: ${pairLabel}`);
+
+    // Buttons via foreignObject
+    const btnContainer = selGroup.append('foreignObject').attr('class', 'box-sel-buttons')
+        .attr('x', x1 + 5).attr('y', srcBounds.boxY).attr('width', 130).attr('height', 60)
+        .style('pointer-events', 'all');
+    const btnDiv = btnContainer.append('xhtml:div')
+        .style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
+
+    btnDiv.append('xhtml:button')
+        .style('padding', '4px 8px').style('border', `1px solid ${color}`).style('border-radius', '4px')
+        .style('background', color).style('color', '#fff').style('cursor', 'pointer')
+        .style('font-size', '11px').style('font-weight', '600').style('font-family', 'inherit')
+        .text('Export CSV')
+        .on('click', async function(event) {
+            event.stopPropagation();
+            const btn = d3.select(this);
+            btn.text('Loading...').style('opacity', 0.6).style('pointer-events', 'none');
+            try { await exportBoxSelectionCSV(selection); }
+            finally { btn.text('Export CSV').style('opacity', 1).style('pointer-events', 'all'); }
+        })
+        .on('mouseenter', function() { d3.select(this).style('opacity', 0.85); })
+        .on('mouseleave', function() { d3.select(this).style('opacity', 1); });
+
+    btnDiv.append('xhtml:button')
+        .style('padding', '4px 8px').style('border', '1px solid #dc3545').style('border-radius', '4px')
+        .style('background', '#fff').style('color', '#dc3545').style('cursor', 'pointer')
+        .style('font-size', '11px').style('font-weight', '600').style('font-family', 'inherit')
+        .text('Remove')
+        .on('click', (event) => { event.stopPropagation(); removeBoxSelection(id); })
+        .on('mouseenter', function() { d3.select(this).style('background', '#dc3545').style('color', '#fff'); })
+        .on('mouseleave', function() { d3.select(this).style('background', '#fff').style('color', '#dc3545'); });
+}
+
+/** Remove a box selection by ID. */
+function removeBoxSelection(id) {
+    const idx = boxSelections.findIndex(s => s.id === id);
+    if (idx !== -1) boxSelections.splice(idx, 1);
+    if (boxSelectionsGroup) {
+        boxSelectionsGroup.select(`.box-selection-${id}`).remove();
+    }
+}
+
+/** Recompute and redraw all box selections from stored data coordinates. */
+function redrawAllBoxSelections() {
+    if (!boxSelectionsGroup) return;
+    boxSelectionsGroup.selectAll('.persistent-box-selection').remove();
+    boxSelections.forEach(sel => createBoxSelectionVisual(sel));
+}
+
+/**
+ * Export selected packets as CSV.
+ * Loads raw packets via fetchResManager for the selected time range and IP pairs.
+ * Falls back to state.data.full if raw resolution is unavailable.
+ */
+async function exportBoxSelectionCSV(selection) {
+    const { timeRange, sourceIP, partnerIP, isCollapsed, allPairs, pairKey } = selection;
+
+    // Determine target IP pairs
+    let targetPairKeys;
+    if (isCollapsed) {
+        targetPairKeys = new Set(allPairs);
+    } else if (pairKey) {
+        targetPairKeys = new Set([pairKey]);
+    } else {
+        targetPairKeys = new Set(getAllPairsForIP(sourceIP));
+    }
+
+    // Load raw packets from fetchResManager (not pre-binned state.data.full)
+    let packets = [];
+    if (fetchResManager.initialized) {
+        try {
+            const rawData = await fetchChunksForRange(timeRange.start, timeRange.end, 'raw');
+            packets = rawData.filter(p => {
+                if (!p.src_ip || !p.dst_ip) return false;
+                return targetPairKeys.has(makeIpPairKey(p.src_ip, p.dst_ip));
+            });
+        } catch (e) {
+            console.error('[exportBoxSelectionCSV] Failed to load raw packets:', e);
+        }
+    }
+
+    // Fallback: try state.data.full if raw loading failed or unavailable
+    if (packets.length === 0) {
+        packets = (state.data.full || []).filter(p => {
+            if (!p.src_ip || !p.dst_ip) return false;
+            const ts = p.timestamp || p.time || 0;
+            if (ts < timeRange.start || ts > timeRange.end) return false;
+            return targetPairKeys.has(makeIpPairKey(p.src_ip, p.dst_ip));
+        });
+    }
+
+    if (packets.length === 0) {
+        alert('No packets found for this selection.\nRaw packet data may not be available for this time range.');
+        return;
+    }
+
+    packets.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+    const headers = [
+        'timestamp', 'utc_time', 'src_ip', 'src_port', 'dst_ip', 'dst_port',
+        'flags', 'flag_type', 'length'
+    ];
+    const lines = [headers.join(',')];
+
+    for (const p of packets) {
+        const ts = Math.floor(p.timestamp || p.time || 0);
+        const { utcTime } = formatTimestamp(ts);
+        const ft = p.flag_type || p.flagType || classifyFlags(p.flags) || '';
+        lines.push([
+            ts,
+            `"${utcTime}"`,
+            p.src_ip || '',
+            p.src_port || '',
+            p.dst_ip || '',
+            p.dst_port || '',
+            p.flags ?? '',
+            `"${ft}"`,
+            p.length ?? ''
+        ].join(','));
+    }
+
+    const csvContent = lines.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeSrc = (sourceIP || 'unknown').replace(/[^\w.:-]/g, '_');
+    const safeDst = (partnerIP || 'all').replace(/[^\w.:-]/g, '_');
+    a.href = url;
+    a.download = `selection_${selection.id}_${safeSrc}_${safeDst}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
 /**
  * Re-render flow detail view when zooming (updates positions based on current xScale)
  */
@@ -4152,6 +4591,7 @@ function visualizeTimeArcs(packets) {
     document.getElementById('loadingMessage').style.display = 'none';
     isInitialResolutionLoad = true;
     resetResolutionTransitionState();
+    boxSelectionsGroup = null; // Will be recreated by setupBoxSelectionDrag()
 
     if (!packets || packets.length === 0) {
         document.getElementById('loadingMessage').textContent = 'No data to visualize.';
@@ -4364,6 +4804,7 @@ function visualizeTimeArcs(packets) {
         setCurrentResolutionLevel: (level) => { currentResolutionLevel = level; },
         drawAutoFlowThreading,
         clearAutoFlowThreading,
+        redrawAllBoxSelections,
         logCatchError
     });
 
@@ -4371,7 +4812,8 @@ function visualizeTimeArcs(packets) {
     zoom = createZoomBehavior({
         d3,
         scaleExtent: [1, 1e9],
-        onZoom: zoomed
+        onZoom: zoomed,
+        isBoxSelectionActive: () => state.ui.enableBoxSelection
     });
     // Attach zoom to inner svg group (not outer svgContainer) so D3's
     // pointer-anchored zoom uses the circle coordinate system (post-margin).
@@ -4408,6 +4850,7 @@ function visualizeTimeArcs(packets) {
             try { isHardResetInProgress = true; applyZoomDomain(xScale.domain(), 'program'); } catch(e) { logCatchError('applyZoomDomain', e); }
             try { drawSelectedFlowArcs(); } catch(e) { logCatchError('drawSelectedFlowArcs', e); }
             try { drawSubRowArcs(); } catch(e) { logCatchError('drawSubRowArcs', e); }
+            try { redrawAllBoxSelections(); } catch(e) { logCatchError('redrawBoxSelections', e); }
             try {
                 if (state.ui.showGroundTruth) {
                     const selectedIPs = Array.from(document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')).map(cb => cb.value);
@@ -4547,9 +4990,14 @@ function visualizeTimeArcs(packets) {
     drawGroundTruthBoxes(selectedIPs);
     drawSelectedFlowArcs();
     drawSubRowArcs();
+
+    // 21. Setup box selection and restore any persistent selections
+    setupBoxSelectionDrag();
+    redrawAllBoxSelections();
+
     try { drawFlagLegend(); } catch(e) { logCatchError('drawFlagLegend', e); }
 
-    // 21. Final overlay sizing
+    // 22. Final overlay sizing
     try {
         resizeBottomOverlay({
             d3,

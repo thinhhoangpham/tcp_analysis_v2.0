@@ -3,6 +3,7 @@
 
 import { classifyFlags } from '../tcp/flags.js';
 import { computeBarWidthPx } from '../data/binning.js';
+import { SUB_ROW_HEIGHT, SUB_ROW_GAP } from '../config/constants.js';
 
 /**
  * Create IP pair key from src and dst IPs (alphabetically ordered for consistency).
@@ -114,10 +115,6 @@ export function renderBars(layer, binned, options) {
         if (s.total > maxStackTotal) maxStackTotal = s.total;
     }
 
-    // Layout constants
-    const SUB_ROW_GAP = 2; // Gap between sub-rows
-    const DEFAULT_ROW_HEIGHT = ROW_GAP || 30;
-
     const toSegments = (s) => {
         const parts = Array.from(s.byFlag.entries()).map(([flagKey, info]) => ({
             flagKey,
@@ -132,24 +129,15 @@ export function renderBars(layer, binned, options) {
             return b.count - a.count;
         });
 
-        // Get this IP's row height (dynamic per-IP)
-        const rowHeight = (ipRowHeights && ipRowHeights.get(s.srcIp)) || DEFAULT_ROW_HEIGHT;
-        const availableHeight = Math.max(20, rowHeight - 6);
-
-        // Calculate sub-row height based on how many pairs share this row
-        const pairCount = s.pairCount || 1;
-        const totalGaps = Math.max(0, pairCount - 1) * SUB_ROW_GAP;
-        const subRowHeight = Math.max(4, (availableHeight - totalGaps) / pairCount);
-
-        // Scale bar heights to fit within sub-row
+        // Scale bar heights to fit within fixed sub-row height
         const hScale = d3.scaleLinear()
             .domain([0, maxStackTotal])
-            .range([0, subRowHeight]);
+            .range([0, SUB_ROW_HEIGHT]);
 
         // First pair (pairIndex 0) aligns with baseline (yPos) where label is
         // Subsequent pairs grow DOWNWARD from there
         // Offset by half sub-row height so bar center aligns with label
-        const pairTopY = s.yPos - subRowHeight / 2 + s.pairIndex * (subRowHeight + SUB_ROW_GAP);
+        const pairTopY = s.yPos - SUB_ROW_HEIGHT / 2 + s.pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP);
 
         let acc = 0;
         return parts.map((p, idx) => {
@@ -164,7 +152,7 @@ export function renderBars(layer, binned, options) {
                 h,
                 segIdx: idx,
                 ipPairKey: s.ipPairKey,
-                subRowCenter: pairTopY + subRowHeight / 2,
+                subRowCenter: pairTopY + SUB_ROW_HEIGHT / 2,
                 datum: {
                     binned: true,
                     count: p.count,

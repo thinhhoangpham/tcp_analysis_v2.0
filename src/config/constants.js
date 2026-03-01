@@ -53,6 +53,10 @@ export const RADIUS_MAX = 15;
 export const ROW_GAP = 30;
 export const TOP_PAD = 30;
 
+// Sub-row layout (IP pair expansion)
+export const SUB_ROW_HEIGHT = RADIUS_MAX * 2;  // 30px — fits max circle diameter
+export const SUB_ROW_GAP = 2;
+
 // TCP States (matching tcp_analysis.py)
 export const TCP_STATES = {
     S_NEW: 0,

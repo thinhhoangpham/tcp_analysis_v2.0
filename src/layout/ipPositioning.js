@@ -1,7 +1,7 @@
 // src/layout/ipPositioning.js
 // IP ordering and positioning logic for TimeArcs visualization
 
-import { ROW_GAP, TOP_PAD } from '../config/constants.js';
+import { ROW_GAP, TOP_PAD, SUB_ROW_HEIGHT, SUB_ROW_GAP } from '../config/constants.js';
 
 /**
  * Count packets per IP address.
@@ -154,15 +154,14 @@ export function computeIPPositioning(packets, options = {}) {
     const ipPairCounts = computeIPPairCounts(packets);
 
     // Calculate row height for each IP based on its pair count
-    // Each pair needs ~12px of vertical space, minimum is base rowGap
-    // When separateFlags is on, each sub-row needs more space for vertically spread flag circles
-    const SUB_ROW_HEIGHT = separateFlags ? 36 : 12;
+    // Each pair gets SUB_ROW_HEIGHT (= RADIUS_MAX * 2 = 30px) so max-size circles fit
+    // When separateFlags is on, double the sub-row height for vertically spread flag circles
+    const effectiveSubRowHeight = separateFlags ? SUB_ROW_HEIGHT * 2 : SUB_ROW_HEIGHT;
     const ipRowHeights = new Map();
 
     ipList.forEach(ip => {
         const pairCount = ipPairCounts.get(ip) || 1;
-        // Height = base gap + extra for additional pairs
-        const height = Math.max(rowGap, pairCount * SUB_ROW_HEIGHT + 8);
+        const height = Math.max(rowGap, pairCount * (effectiveSubRowHeight + SUB_ROW_GAP));
         ipRowHeights.set(ip, height);
     });
 
