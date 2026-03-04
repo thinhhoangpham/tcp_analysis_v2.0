@@ -122,7 +122,6 @@ export function createTimeArcsZoomHandler(context) {
         setCurrentResolutionLevel,
         drawAutoFlowThreading,
         clearAutoFlowThreading,
-        redrawAllBoxSelections,
         logCatchError
     } = context;
 
@@ -493,11 +492,6 @@ export function createTimeArcsZoomHandler(context) {
             // correct positions from freshly rendered DOM circles.
             if (drawSubRowArcs) {
                 try { drawSubRowArcs(); } catch (e) { logCatchError('drawSubRowArcs-postRender', e); }
-            }
-
-            // Redraw box selection rectangles to track current zoom position.
-            if (redrawAllBoxSelections) {
-                try { redrawAllBoxSelections(); } catch (e) { logCatchError('redrawBoxSelections-postRender', e); }
             }
 
             // Auto flow threading: draw sequential arcs at raw resolution,

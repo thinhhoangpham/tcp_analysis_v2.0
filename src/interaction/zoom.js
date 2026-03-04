@@ -7,7 +7,7 @@
  * @returns {Object} D3 zoom behavior
  */
 export function createZoomBehavior(options) {
-    const { d3, scaleExtent = [1, 1e9], onZoom, isBoxSelectionActive } = options;
+    const { d3, scaleExtent = [1, 1e9], onZoom } = options;
 
     return d3.zoom()
         .filter((event) => {
@@ -15,10 +15,6 @@ export function createZoomBehavior(options) {
             // Only zoom on wheel with modifier key
             if (event.type === 'wheel') {
                 return event.ctrlKey || event.metaKey || event.shiftKey;
-            }
-            // When box selection mode is enabled, suppress drag-pan so click-drag draws boxes
-            if (isBoxSelectionActive && isBoxSelectionActive()) {
-                return false;
             }
             return true;
         })

@@ -280,6 +280,63 @@ export function renderCircles(layer, binned, options) {
 
     const transitionDuration = transitionOpts?.duration || 250;
 
+    // --- Hover event handlers (defined per render so closures capture current xScale, ipPositions, etc.) ---
+    const handleMousemove = e => {
+        tooltip.style('left', `${e.pageX + 40}px`).style('top', `${e.pageY - 40}px`);
+    };
+    const handleMouseout = e => {
+        const dot = d3.select(e.currentTarget);
+        dot.classed('highlighted', false).style('stroke', null).style('stroke-width', null);
+        const baseR = +dot.attr('data-orig-r') || RADIUS_MIN; dot.attr('r', baseR);
+        mainGroup.selectAll('.hover-arc').remove(); tooltip.style('display', 'none');
+        if (onCircleClearHighlight) onCircleClearHighlight();
+    };
+    const handleMouseover = (event, d) => {
+        const dot = d3.select(event.currentTarget);
+        dot.classed('highlighted', true).style('stroke', '#000').style('stroke-width', '2px');
+        const baseR = +dot.attr('data-orig-r') || +dot.attr('r') || RADIUS_MIN;
+        dot.attr('r', baseR);
+
+        // S-curve hover: find the next circle in the same directional flow and draw an S-curve to it.
+        // In binned state each circle represents packets in a time window; consecutive circles in the
+        // same src→dst IP pair are connected by the same S-curve geometry used in drawFlowDetailArcs.
+        mainGroup.selectAll('.hover-arc').remove();
+        const color = getFlagColor(d);
+        const pairKey = makeIpPairKey(d.src_ip, d.dst_ip);
+        const arrowLen = 5, arrowHalfW = 3;
+
+        // Synthesize dummy node: project forward from the hovered circle.
+        // Use bin width if available (scales with resolution), otherwise a fixed minimum.
+        const x1 = xScale(Math.floor(d.binned && Number.isFinite(d.binCenter) ? d.binCenter : d.timestamp));
+        const y1 = d.yPosWithOffset;
+        const yDst = calculateYPosWithOffset(d.dst_ip, pairKey);
+        const binWidthPx = (d.bin_start != null && d.bin_end != null)
+            ? Math.abs(xScale(d.bin_end) - xScale(d.bin_start))
+            : 40;
+        const xDummy = x1 + Math.max(20, binWidthPx);
+        const midX = (x1 + xDummy) / 2;
+
+        if (yDst != null && Math.abs(yDst - y1) > 1) {
+            mainGroup.append('path').attr('class', 'hover-arc')
+                .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${yDst} ${xDummy},${yDst}`)
+                .attr('fill', 'none').attr('stroke', color)
+                .attr('stroke-width', 2).attr('stroke-opacity', 0.8)
+                .style('pointer-events', 'none');
+            const a = Math.atan2(2 * (yDst - y1), xDummy - x1);
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const mx = midX, my = (y1 + yDst) / 2;
+            mainGroup.append('polygon').attr('class', 'hover-arc')
+                .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
+                .attr('fill', color).attr('fill-opacity', 0.8).style('pointer-events', 'none');
+        }
+
+        tooltip.style('display', 'block').html(createTooltipHTML(d));
+        if (onCircleHighlight) {
+            const dstIps = new Set((d.ipPairs || [{ dst_ip: d.dst_ip }]).map(p => p.dst_ip));
+            onCircleHighlight(d.src_ip, dstIps);
+        }
+    };
+
     layer.selectAll('.direction-dot')
         .data(processed, getDataKey)
         .join(
@@ -300,75 +357,9 @@ export function renderCircles(layer, binned, options) {
                 .attr('cy', d => d.yPosWithOffset)
                 .style('cursor', 'pointer')
                 .style('opacity', enterStartCx ? 0.3 : null)
-                .on('mouseover', (event, d) => {
-                    const dot = d3.select(event.currentTarget);
-                    dot.classed('highlighted', true).style('stroke', '#000').style('stroke-width', '2px');
-                    const baseR = +dot.attr('data-orig-r') || +dot.attr('r') || RADIUS_MIN;
-                    dot.attr('r', baseR);
-                    const pairsToArc = d.ipPairs || [{ src_ip: d.src_ip, dst_ip: d.dst_ip }];
-                    pairsToArc.forEach(p => {
-                        // Source y: use circle's actual position (includes flag separation offset)
-                        const pairKey = makeIpPairKey(p.src_ip, p.dst_ip);
-                        const srcY = d.yPosWithOffset;
-                        const dstY = calculateYPosWithOffset(p.dst_ip, pairKey);
-                        const arcOpts = { xScale, ipPositions, pairs, findIPPosition, flagCurvature: FLAG_CURVATURE, srcY, dstY };
-                        const arcD = { src_ip: p.src_ip, dst_ip: p.dst_ip, binned: d.binned, binCenter: d.binCenter, timestamp: d.timestamp, flagType: d.flagType, flags: d.flags };
-                        const arcPath = arcPathGenerator(arcD, arcOpts);
-                        if (arcPath) {
-                            const color = getFlagColor(d);
-                            // Draw full arc
-                            const arcEl = mainGroup.append('path').attr('class', 'hover-arc').attr('d', arcPath)
-                                .style('stroke', color).style('stroke-width', '2px')
-                                .style('stroke-opacity', 0.8).style('fill', 'none')
-                                .style('pointer-events', 'none');
-                            // Arrowhead: fixed 12px line at end with marker-end
-                            const pathNode = arcEl.node();
-                            const totalLen = pathNode.getTotalLength();
-                            const ARROW_BACK = 12;
-                            if (totalLen > ARROW_BACK + 5) {
-                                const sp = pathNode.getPointAtLength(totalLen - ARROW_BACK);
-                                const ep = pathNode.getPointAtLength(totalLen);
-                                const colorKey = color.replace(/[^a-zA-Z0-9]/g, '');
-                                const markerId = `arc-arrow-${colorKey}`;
-                                const svgEl = d3.select(mainGroup.node().ownerSVGElement);
-                                let defs = svgEl.select('defs');
-                                if (defs.empty()) defs = svgEl.insert('defs', ':first-child');
-                                if (defs.select(`#${markerId}`).empty()) {
-                                    defs.append('marker')
-                                        .attr('id', markerId)
-                                        .attr('viewBox', '0 0 10 10')
-                                        .attr('refX', 10).attr('refY', 5)
-                                        .attr('markerWidth', 8).attr('markerHeight', 8)
-                                        .attr('markerUnits', 'userSpaceOnUse')
-                                        .attr('orient', 'auto')
-                                      .append('path')
-                                        .attr('d', 'M0,0 L10,5 L0,10 Z')
-                                        .attr('fill', color);
-                                }
-                                mainGroup.append('path').attr('class', 'hover-arc')
-                                    .attr('d', `M${sp.x},${sp.y} L${ep.x},${ep.y}`)
-                                    .style('stroke', color).style('stroke-width', '2px')
-                                    .style('stroke-opacity', 0.8).style('fill', 'none')
-                                    .style('pointer-events', 'none')
-                                    .attr('marker-end', `url(#${markerId})`);
-                            }
-                        }
-                    });
-                    tooltip.style('display', 'block').html(createTooltipHTML(d));
-                    // Highlight source/destination IP labels and rows
-                    if (onCircleHighlight) {
-                        const dstIps = new Set(pairsToArc.map(p => p.dst_ip));
-                        onCircleHighlight(d.src_ip, dstIps);
-                    }
-                })
-                .on('mousemove', e => { tooltip.style('left', `${e.pageX + 40}px`).style('top', `${e.pageY - 40}px`); })
-                .on('mouseout', e => {
-                    const dot = d3.select(e.currentTarget);
-                    dot.classed('highlighted', false).style('stroke', null).style('stroke-width', null);
-                    const baseR = +dot.attr('data-orig-r') || RADIUS_MIN; dot.attr('r', baseR);
-                    mainGroup.selectAll('.hover-arc').remove(); tooltip.style('display', 'none');
-                    if (onCircleClearHighlight) onCircleClearHighlight();
-                });
+                .on('mouseover', handleMouseover)
+                .on('mousemove', handleMousemove)
+                .on('mouseout', handleMouseout);
 
                 // Animate entering circles from parent position (zoom-in)
                 if (enterStartCx) {
@@ -385,7 +376,10 @@ export function renderCircles(layer, binned, options) {
                 .attr('fill', getFlagColor)
                 .attr('cx', getFinalCx)
                 .attr('cy', d => d.yPosWithOffset)
-                .style('cursor', 'pointer'),
+                .style('cursor', 'pointer')
+                .on('mouseover', handleMouseover)
+                .on('mousemove', handleMousemove)
+                .on('mouseout', handleMouseout),
             exit => {
                 // Zoom-out: converge exiting fine circles toward their coarse parent
                 if (transitionOpts?.type === 'zoom-out' && exitTargetIndex) {

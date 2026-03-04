@@ -460,7 +460,9 @@ This pattern is used at 4 sites: resolution change, drag-reorder, collapse/expan
 
 Three types of arc links connect circles in the Packet View:
 
-1. **Hover arcs** (temporary) — drawn on circle mouseover in `circles.js:228-281`. Colored arc from source to destination IP at the circle's actual sub-row offset position. Includes SVG `<marker>` arrowhead at the destination end. Removed on mouseout.
+1. **Hover S-curves** (temporary) — drawn on circle mouseover in `circles.js`. Replaces the old arc-to-destination with an S-curve that shows flow direction. The dummy node endpoint is synthesized by projecting forward from the hovered circle by one bin width (`d.bin_end - d.bin_start` converted to pixels, min 20px). The S-curve bends down to the destination IP's sub-row y-position then ends at the dummy node x. Includes a midpoint polygon arrowhead. Removed on mouseout.
+   - **Event handlers** (`handleMouseover`, `handleMousemove`, `handleMouseout`) are defined as named closures inside `renderCircles` and bound in **both** the `enter` and `update` join paths, so all circles (newly entered and persisted across zoom/pan) always use the current render's `xScale` and `calculateYPosWithOffset`.
+   - **Collapsed circles** (`ipPairKey === '__collapsed__'`) have ambiguous `dst_ip` and skip S-curve drawing; tooltip and IP highlight still fire normally.
 
 2. **Sub-row arcs** (`#showSubRowArcs` toggle, `state.ui.showSubRowArcs`) — persistent low-opacity arcs connecting IP pair sub-rows. Drawn by `drawSubRowArcs()` in `tcp-analysis.js`. Toggled via Control Panel checkbox.
 
@@ -528,7 +530,7 @@ Box selection allows users to select packets on circle rows for raw CSV export:
 - `showLineArrowhead(container, datum, color, targetRadius, strokeWidth)` — renders a directional arrowhead on a hovered force-layout link; returns base position so the line can be trimmed to not overlap the arrow
 - `removeArrowheads(container)` — cleans up arrowhead overlays on mouseout
 
-**Directional arrows** appear on mouseover only (not permanently, to avoid clutter). Both timearcs arcs (`arcInteractions.js:74-75`) and force layout links (`force_network.js:438-454`) call these. In the TCP Analysis Packet View, `circles.js` uses SVG `<marker>` definitions (`marker-end`) to draw arrowheads on hover arcs between circles.
+**Directional arrows** appear on mouseover only (not permanently, to avoid clutter). Both timearcs arcs (`arcInteractions.js:74-75`) and force layout links (`force_network.js:438-454`) call these. In the TCP Analysis Packet View, `circles.js` draws a midpoint polygon arrowhead on the hover S-curve (no SVG `<marker>` — arrowhead is computed from the Bezier tangent angle at the curve midpoint).
 
 ### Control Panel
 

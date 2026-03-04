@@ -63,13 +63,13 @@
         <div class="controls">
         <div class="control-group">
             <label>IP Addresses</label>
-            <div id="ipSelector" style="border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px;">
-                <div style="margin-bottom: 10px;">
-                    <input type="text" id="ipSearch" placeholder="Search IP addresses..." style="width: 100%; padding: 5px; margin-bottom: 10px; border: 1px solid #ced4da; border-radius: 3px;">
+            <div id="ipSelector" style="border: 1px solid #dee2e6; padding: 7px; background: white; border-radius: 4px;">
+                <div style="margin-bottom: 6px;">
+                    <input type="text" id="ipSearch" placeholder="Search IP addresses..." style="width: 100%; padding: 3px 5px; margin-bottom: 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px;">
                     <button id="selectAllIPs" class="cp-btn" style="margin-right: 6px;">Select All</button>
                     <button id="clearAllIPs" class="cp-btn">Clear All</button>
                 </div>
-                <div id="ipCheckboxes" style="max-height: 200px; overflow-y: auto;"></div>
+                <div id="ipCheckboxes" style="max-height: 160px; overflow-y: auto;"></div>
             </div>
         </div>
         <div class="control-group">
@@ -92,10 +92,6 @@
             <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
                 <input type="checkbox" id="showFlowThreading" style="margin-right: 6px;" checked title="Auto-draw flow threading lines at raw packet resolution">
                 Flow Threading
-            </label>
-            <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
-                <input type="checkbox" id="enableBoxSelection" style="margin-right: 6px;" title="Click and drag across rows to select packets for export">
-                Box Selection
             </label>
         </div>
         <div class="control-group collapsible collapsed">

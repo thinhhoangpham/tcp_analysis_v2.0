@@ -92,7 +92,7 @@ export function createIPCheckboxes(uniqueIPs, onChange) {
     // Build checkboxes (identical to original)
     uniqueIPs.forEach(ip => {
         const div = document.createElement('div');
-        div.style.marginBottom = '5px';
+        div.style.marginBottom = '2px';
         div.className = 'ip-item';
         div.dataset.ip = ip;
         const checkbox = document.createElement('input');
@@ -106,8 +106,8 @@ export function createIPCheckboxes(uniqueIPs, onChange) {
         const label = document.createElement('label');
         label.htmlFor = checkbox.id;
         label.textContent = ip;
-        label.style.marginLeft = '5px';
-        label.style.fontSize = '12px';
+        label.style.marginLeft = '4px';
+        label.style.fontSize = '11px';
         label.style.cursor = 'pointer';
         div.appendChild(checkbox);
         div.appendChild(label);
@@ -406,12 +406,12 @@ export function createFlowListCapped(flows, selectedFlowIds, formatBytes, format
 
             // Build button HTML based on whether packet data is available for this flow
             const viewBtnHTML = flowHasPacketData
-                ? `<button class=\"flow-view-btn cp-btn cp-btn-primary\" data-flow-id=\"${flow.id}\" title=\"View packets with arcs\">📊 View Packets</button>`
-                : `<button class=\"flow-view-btn cp-btn\" data-flow-id=\"${flow.id}\" title=\"Packet data not available (summary mode)\" disabled>📊 View Packets</button>`;
+                ? `<button class=\"flow-view-btn cp-btn cp-btn-primary\" data-flow-id=\"${flow.id}\" title=\"View packets with arcs\">View Packets</button>`
+                : `<button class=\"flow-view-btn cp-btn\" data-flow-id=\"${flow.id}\" title=\"Packet data not available (summary mode)\" disabled>View Packets</button>`;
 
             const exportBtnHTML = flowHasPacketData
-                ? `<button class=\"flow-export-btn cp-btn\" data-flow-id=\"${flow.id}\" style=\"margin-left:auto;\">Export CSV</button>`
-                : `<button class=\"flow-export-btn cp-btn\" data-flow-id=\"${flow.id}\" style=\"margin-left:auto;\" title=\"Packet data not available (summary mode)\" disabled>Export CSV</button>`;
+                ? `<button class=\"flow-export-btn cp-btn\" data-flow-id=\"${flow.id}\">Export CSV</button>`
+                : `<button class=\"flow-export-btn cp-btn\" data-flow-id=\"${flow.id}\" title=\"Packet data not available (summary mode)\" disabled>Export CSV</button>`;
 
             item.innerHTML = `
                 <input type=\"checkbox\" class=\"flow-checkbox\" id=\"flow-${flow.id}\" ${selectedFlowIds.has(String(flow.id)) ? 'checked' : ''}>
@@ -423,6 +423,8 @@ export function createFlowListCapped(flows, selectedFlowIds, formatBytes, format
                         <span>${formatBytes(flow.totalBytes)}</span>
                         <span>${duration}s duration</span>
                         <span>${closeTypeText}</span>
+                    </div>
+                    <div style=\"display:flex; gap:6px; justify-content:flex-end; margin-top:4px;\">
                         ${viewBtnHTML}
                         ${exportBtnHTML}
                     </div>
@@ -497,7 +499,6 @@ export function wireControlPanelControls(opts) {
     on('showSubRowArcs', 'change', (e) => { if (opts.onToggleSubRowArcs) opts.onToggleSubRowArcs(e.target.checked); });
     on('separateFlags', 'change', (e) => { if (opts.onToggleSeparateFlags) opts.onToggleSeparateFlags(e.target.checked); });
     on('showFlowThreading', 'change', (e) => { if (opts.onToggleFlowThreading) opts.onToggleFlowThreading(e.target.checked); });
-    on('enableBoxSelection', 'change', (e) => { if (opts.onToggleBoxSelection) opts.onToggleBoxSelection(e.target.checked); });
 }
 
 // Inline SVG arc icon matching the flag color legend in the packet view

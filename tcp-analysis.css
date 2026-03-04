@@ -51,7 +51,7 @@ h1 {
     position: fixed;
     top: 50px;
     right: 10px;
-    width: 340px;
+    width: 300px;
     max-height: calc(100vh - 60px);
     overflow: visible;
     -webkit-overflow-scrolling: touch;
@@ -75,7 +75,7 @@ h1 {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 12px;
+    padding: 7px 10px;
     background: #f8f9fa;
     border-bottom: 1px solid #dee2e6;
     border-radius: 0;
@@ -91,7 +91,7 @@ h1 {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 600;
     color: #495057;
 }
@@ -125,14 +125,14 @@ h1 {
     border-right: none;
     border-top: 1px solid #dee2e6;
     border-bottom: none;
-    padding: 10px 0;
+    padding: 7px 0;
 }
 .controls {
     margin-bottom: 0;
     display: flex;
     flex-direction: column;
-    gap: 15px;
-    padding: 12px;
+    gap: 10px;
+    padding: 9px;
     overflow-y: auto;
     flex: 1 1 auto;
     min-height: 0;
@@ -182,7 +182,7 @@ h1 {
 }
 label {
     font-weight: 600;
-    font-size: 14px;
+    font-size: 12px;
 }
 .tooltip {
     position: absolute;
@@ -664,9 +664,9 @@ svg {
     gap: 4px;
 }
 #zoomOutBtn, #zoomInBtn {
-    width: 36px;
-    height: 36px;
-    font-size: 20px;
+    width: 28px;
+    height: 28px;
+    font-size: 16px;
     font-weight: bold;
     cursor: pointer;
     border: 1px solid #ced4da;
