@@ -3831,7 +3831,7 @@ function renderFlowDetailView(flow, packets) {
  * @param {Function} getX      - (packet) => x pixel
  * @param {Function} getY      - (packet) => y pixel
  */
-function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
+function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY, { skipTrailingArc = false } = {}) {
     if (!lineGroup || packets.length < 2) return;
 
     const arrowLen = 5;
@@ -3854,6 +3854,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
 
         const flagType = p1.flagType || p1.flag_type || getFlagType(p1);
         const color = flagColors[flagType] || flagColors['OTHER'] || '#999';
+        const pktTime = String(p1.timestamp || p1.binCenter || 0);
 
         const sameIP = p1.src_ip === p2.src_ip;
         let midPtX, midPtY, angle;
@@ -3870,6 +3871,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
                 const midX1 = (x1 + xDummy) / 2;
                 lineGroup.append('path')
                     .attr('class', cssClass)
+                    .attr('data-pkt-time', pktTime)
                     .attr('d', `M${x1},${y1} C${midX1},${y1} ${midX1},${yDst} ${xDummy},${yDst}`)
                     .attr('fill', 'none')
                     .attr('stroke', color)
@@ -3882,6 +3884,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
                 const m1x = midX1, m1y = (y1 + yDst) / 2;
                 lineGroup.append('polygon')
                     .attr('class', cssClass)
+                    .attr('data-pkt-time', pktTime)
                     .attr('points', `${m1x + arrowLen*c1},${m1y + arrowLen*s1} ${m1x - arrowLen*c1 + arrowHalfW*s1},${m1y - arrowLen*s1 - arrowHalfW*c1} ${m1x - arrowLen*c1 - arrowHalfW*s1},${m1y - arrowLen*s1 + arrowHalfW*c1}`)
                     .attr('fill', color)
                     .attr('fill-opacity', 0.8);
@@ -3892,6 +3895,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
             // Fallback: straight line when dst IP row is unavailable or same row
             lineGroup.append('line')
                 .attr('class', cssClass)
+                .attr('data-pkt-time', pktTime)
                 .attr('x1', x1).attr('y1', y1)
                 .attr('x2', x2).attr('y2', y2)
                 .attr('stroke', color)
@@ -3904,6 +3908,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
             const midX = (x1 + x2) / 2;
             lineGroup.append('path')
                 .attr('class', cssClass)
+                .attr('data-pkt-time', pktTime)
                 .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`)
                 .attr('fill', 'none')
                 .attr('stroke', color)
@@ -3925,6 +3930,7 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
         const by2 = midPtY - arrowLen * sin + arrowHalfW * cos;
         lineGroup.append('polygon')
             .attr('class', cssClass)
+            .attr('data-pkt-time', pktTime)
             .attr('points', `${tipX},${tipY} ${bx1},${by1} ${bx2},${by2}`)
             .attr('fill', color)
             .attr('fill-opacity', 0.8);
@@ -3932,9 +3938,10 @@ function drawFlowDetailArcs(lineGroup, cssClass, packets, getX, getY) {
 
     // -- Trailing arc: last packet → destination IP row --
     // Dashed S-curve showing where the final packet was headed (no dot).
+    // Skipped when the flow continues beyond the viewport (next packet is just off-screen).
     const lastPkt = packets[packets.length - 1];
     const prevPkt = packets[packets.length - 2];
-    if (lastPkt && prevPkt && lastPkt.src_ip !== lastPkt.dst_ip) {
+    if (!skipTrailingArc && lastPkt && prevPkt && lastPkt.src_ip !== lastPkt.dst_ip) {
         const lastX = getX(lastPkt);
         const prevX = getX(prevPkt);
         const lastY = getY(lastPkt);
@@ -4007,12 +4014,8 @@ function drawAutoFlowThreading(packets) {
         group.push(p);
     }
 
-    // Sort each group by timestamp; drop groups with < 2 packets
+    // Sort each group by timestamp (keep single-packet groups for trailing arc)
     for (const [key, group] of flowGroups) {
-        if (group.length < 2) {
-            flowGroups.delete(key);
-            continue;
-        }
         group.sort((a, b) => (a.timestamp || a.binCenter || 0) - (b.timestamp || b.binCenter || 0));
     }
 
@@ -4046,24 +4049,62 @@ function drawAutoFlowThreading(packets) {
 
     // Draw sequential arcs within each flow group
     for (const [key, group] of flowGroups) {
-        // Sequential arcs + trailing arc (shared with flow-detail mode)
+        const flowMeta = flowMetaByKey.get(key);
+
+        // Always skip the built-in dashed trailing arc — we draw a solid one below instead
         drawFlowDetailArcs(lineGroup, 'flow-threading-arc', group,
             p => xScale(p.timestamp || p.binCenter),
             p => lookupCircleY(circlePosMap, p.timestamp || p.binCenter || 0, p.src_ip, p.dst_ip,
-                p.flagType || p.flag_type || getFlagType(p)));
+                p.flagType || p.flag_type || getFlagType(p)),
+            { skipTrailingArc: true });
+
+        // -- Solid trailing S-curve from last visible packet toward dst IP --
+        // Same geometry as the built-in trailing arc but solid so it matches the other arcs.
+        // Clipped naturally by clip-path when it extends past the viewport.
+        const lastPkt = group[group.length - 1];
+        const prevPkt = group.length >= 2 ? group[group.length - 2] : null;
+        if (lastPkt && lastPkt.src_ip !== lastPkt.dst_ip) {
+            const lastX = xScale(lastPkt.timestamp || lastPkt.binCenter);
+            const ft = lastPkt.flagType || lastPkt.flag_type || getFlagType(lastPkt);
+            const lastY = lookupCircleY(circlePosMap, lastPkt.timestamp || lastPkt.binCenter || 0, lastPkt.src_ip, lastPkt.dst_ip, ft);
+            const trailDstY = getIPYWithSubRowOffset(lastPkt.dst_ip, lastPkt.src_ip, lastPkt.dst_ip);
+            if (trailDstY != null && lastY != null && Math.abs(trailDstY - lastY) > 1) {
+                const color = flagColors[ft] || flagColors['OTHER'] || '#999';
+                const pktTime = String(lastPkt.timestamp || lastPkt.binCenter || 0);
+                const gap = prevPkt ? Math.abs(lastX - xScale(prevPkt.timestamp || prevPkt.binCenter)) : 40;
+                const trailEndX = lastX + Math.max(20, gap);
+                const trailMidX = (lastX + trailEndX) / 2;
+                lineGroup.append('path')
+                    .attr('class', 'flow-threading-arc')
+                    .attr('data-pkt-time', pktTime)
+                    .attr('d', `M${lastX},${lastY} C${trailMidX},${lastY} ${trailMidX},${trailDstY} ${trailEndX},${trailDstY}`)
+                    .attr('fill', 'none')
+                    .attr('stroke', color)
+                    .attr('stroke-width', 1.5)
+                    .attr('stroke-opacity', 0.6);
+                const arrowLen = 5, arrowHalfW = 3;
+                const a = Math.atan2(2 * (trailDstY - lastY), trailEndX - lastX);
+                const ca = Math.cos(a), sa = Math.sin(a);
+                const mx = trailMidX, my = (lastY + trailDstY) / 2;
+                lineGroup.append('polygon')
+                    .attr('class', 'flow-threading-arc')
+                    .attr('data-pkt-time', pktTime)
+                    .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
+                    .attr('fill', color)
+                    .attr('fill-opacity', 0.8);
+            }
+        }
 
         // -- Edge continuation lines (dashed) --
-        const flowMeta = flowMetaByKey.get(key);
         if (!flowMeta) continue;
 
         const firstPkt = group[0];
-        const lastPkt = group[group.length - 1];
 
         // Left continuation: flow started before viewport
         if (flowMeta.startTime != null && flowMeta.startTime < viewStart) {
             const pktX = xScale(firstPkt.timestamp || firstPkt.binCenter);
-            const ft = firstPkt.flagType || firstPkt.flag_type || getFlagType(firstPkt);
-            const pktY = lookupCircleY(circlePosMap, firstPkt.timestamp || firstPkt.binCenter || 0, firstPkt.src_ip, firstPkt.dst_ip, ft);
+            const ft2 = firstPkt.flagType || firstPkt.flag_type || getFlagType(firstPkt);
+            const pktY = lookupCircleY(circlePosMap, firstPkt.timestamp || firstPkt.binCenter || 0, firstPkt.src_ip, firstPkt.dst_ip, ft2);
             lineGroup.append('line')
                 .attr('class', 'flow-threading-arc')
                 .attr('x1', xLeft).attr('y1', pktY)
@@ -4077,8 +4118,8 @@ function drawAutoFlowThreading(packets) {
         // Right continuation: flow ends after viewport
         if (flowMeta.endTime != null && flowMeta.endTime > viewEnd) {
             const pktX = xScale(lastPkt.timestamp || lastPkt.binCenter);
-            const ft = lastPkt.flagType || lastPkt.flag_type || getFlagType(lastPkt);
-            const pktY = lookupCircleY(circlePosMap, lastPkt.timestamp || lastPkt.binCenter || 0, lastPkt.src_ip, lastPkt.dst_ip, ft);
+            const ft2 = lastPkt.flagType || lastPkt.flag_type || getFlagType(lastPkt);
+            const pktY = lookupCircleY(circlePosMap, lastPkt.timestamp || lastPkt.binCenter || 0, lastPkt.src_ip, lastPkt.dst_ip, ft2);
             lineGroup.append('line')
                 .attr('class', 'flow-threading-arc')
                 .attr('x1', pktX).attr('y1', pktY)

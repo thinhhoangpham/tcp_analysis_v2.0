@@ -288,7 +288,14 @@ export function renderCircles(layer, binned, options) {
         const dot = d3.select(e.currentTarget);
         dot.classed('highlighted', false).style('stroke', null).style('stroke-width', null);
         const baseR = +dot.attr('data-orig-r') || RADIUS_MIN; dot.attr('r', baseR);
-        mainGroup.selectAll('.hover-arc').remove(); tooltip.style('display', 'none');
+        // Restore any highlighted flow-threading arcs to normal opacity
+        mainGroup.selectAll('.flow-threading-arc.hover-highlighted')
+            .classed('hover-highlighted', false)
+            .attr('stroke-opacity', function() { return this.tagName === 'polygon' ? null : 0.6; })
+            .attr('fill-opacity', function() { return this.tagName === 'polygon' ? 0.8 : null; })
+            .attr('stroke-width', function() { return this.tagName === 'polygon' ? null : 1.5; });
+        mainGroup.selectAll('.hover-arc').remove();
+        tooltip.style('display', 'none');
         if (onCircleClearHighlight) onCircleClearHighlight();
     };
     const handleMouseover = (event, d) => {
@@ -297,37 +304,47 @@ export function renderCircles(layer, binned, options) {
         const baseR = +dot.attr('data-orig-r') || +dot.attr('r') || RADIUS_MIN;
         dot.attr('r', baseR);
 
-        // S-curve hover: find the next circle in the same directional flow and draw an S-curve to it.
-        // In binned state each circle represents packets in a time window; consecutive circles in the
-        // same src→dst IP pair are connected by the same S-curve geometry used in drawFlowDetailArcs.
         mainGroup.selectAll('.hover-arc').remove();
-        const color = getFlagColor(d);
-        const pairKey = makeIpPairKey(d.src_ip, d.dst_ip);
-        const arrowLen = 5, arrowHalfW = 3;
 
-        // Synthesize dummy node: project forward from the hovered circle.
-        // Use bin width if available (scales with resolution), otherwise a fixed minimum.
-        const x1 = xScale(Math.floor(d.binned && Number.isFinite(d.binCenter) ? d.binCenter : d.timestamp));
-        const y1 = d.yPosWithOffset;
-        const yDst = calculateYPosWithOffset(d.dst_ip, pairKey);
-        const binWidthPx = (d.bin_start != null && d.bin_end != null)
-            ? Math.abs(xScale(d.bin_end) - xScale(d.bin_start))
-            : 40;
-        const xDummy = x1 + Math.max(20, binWidthPx);
-        const midX = (x1 + xDummy) / 2;
+        // At packet level: highlight existing flow-threading arcs tagged with this packet's timestamp.
+        // At binned levels (no flow threading): draw a standalone S-curve as directionality indicator.
+        const pktTime = String(d.timestamp || d.binCenter || 0);
+        const existingArcs = mainGroup.selectAll(`.flow-threading-arc[data-pkt-time="${pktTime}"]`);
+        const isRawPacket = !d.binned || d.count === 1;
 
-        if (yDst != null && Math.abs(yDst - y1) > 1) {
-            mainGroup.append('path').attr('class', 'hover-arc')
-                .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${yDst} ${xDummy},${yDst}`)
-                .attr('fill', 'none').attr('stroke', color)
-                .attr('stroke-width', 2).attr('stroke-opacity', 0.8)
-                .style('pointer-events', 'none');
-            const a = Math.atan2(2 * (yDst - y1), xDummy - x1);
-            const ca = Math.cos(a), sa = Math.sin(a);
-            const mx = midX, my = (y1 + yDst) / 2;
-            mainGroup.append('polygon').attr('class', 'hover-arc')
-                .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
-                .attr('fill', color).attr('fill-opacity', 0.8).style('pointer-events', 'none');
+        if (!existingArcs.empty()) {
+            // Highlight the already-drawn flow threading arcs for this packet
+            existingArcs.classed('hover-highlighted', true)
+                .attr('stroke-opacity', function() { return this.tagName === 'polygon' ? null : 1; })
+                .attr('fill-opacity', function() { return this.tagName === 'polygon' ? 1 : null; })
+                .attr('stroke-width', function() { return this.tagName === 'polygon' ? null : 2.5; });
+        } else if (!isRawPacket) {
+            // Binned level only — draw standalone hover S-curve
+            const color = getFlagColor(d);
+            const pairKey = makeIpPairKey(d.src_ip, d.dst_ip);
+            const arrowLen = 5, arrowHalfW = 3;
+            const x1 = getFinalCx(d);
+            const y1 = d.yPosWithOffset;
+            const yDst = calculateYPosWithOffset(d.dst_ip, pairKey);
+            const binWidthPx = (d.bin_start != null && d.bin_end != null)
+                ? Math.abs(xScale(d.bin_end) - xScale(d.bin_start))
+                : 40;
+            const xDummy = x1 + Math.max(20, binWidthPx);
+            const midX = (x1 + xDummy) / 2;
+
+            if (yDst != null && Math.abs(yDst - y1) > 1) {
+                mainGroup.append('path').attr('class', 'hover-arc')
+                    .attr('d', `M${x1},${y1} C${midX},${y1} ${midX},${yDst} ${xDummy},${yDst}`)
+                    .attr('fill', 'none').attr('stroke', color)
+                    .attr('stroke-width', 2).attr('stroke-opacity', 0.8)
+                    .style('pointer-events', 'none');
+                const a = Math.atan2(2 * (yDst - y1), xDummy - x1);
+                const ca = Math.cos(a), sa = Math.sin(a);
+                const mx = midX, my = (y1 + yDst) / 2;
+                mainGroup.append('polygon').attr('class', 'hover-arc')
+                    .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
+                    .attr('fill', color).attr('fill-opacity', 0.8).style('pointer-events', 'none');
+            }
         }
 
         tooltip.style('display', 'block').html(createTooltipHTML(d));
