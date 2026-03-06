@@ -310,7 +310,7 @@ export function renderCircles(layer, binned, options) {
         // At binned levels (no flow threading): draw a standalone S-curve as directionality indicator.
         const pktTime = String(d.timestamp || d.binCenter || 0);
         const existingArcs = mainGroup.selectAll(`.flow-threading-arc[data-pkt-time="${pktTime}"]`);
-        const isRawPacket = !d.binned || d.count === 1;
+        const isRawPacket = !d.binned || (d.bin_start == null && d.bin_end == null);
 
         if (!existingArcs.empty()) {
             // Highlight the already-drawn flow threading arcs for this packet

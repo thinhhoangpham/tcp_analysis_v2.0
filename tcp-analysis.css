@@ -319,6 +319,10 @@ label {
     fill: #000;
     font-weight: 500;
 }
+.node-label.newly-added {
+    fill: #f1c40f;
+    font-weight: bold;
+}
 
 /* Sub-row IP labels (shown when IP rows are expanded) */
 .sub-row-ip-label {
@@ -719,4 +723,33 @@ svg {
     background: linear-gradient(90deg, #007bff, #0056b3);
     border-radius: 4px;
     transition: width 0.25s ease;
+}
+
+/* ─── Flow Pattern Search trigger button ──────────────────────────────────── */
+
+/* Search highlight boxes: golden bounding-box rects drawn behind matched circles.
+   Styling applied inline via D3 in applySearchHighlightClasses(). */
+
+#openPatternBuilder {
+    width: 100%;
+    text-align: left;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #495057;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+#openPatternBuilder:hover {
+    background: #e9ecef;
+}
+#patternBuilderStatus {
+    font-size: 10px;
+    color: #28a745;
+    font-weight: 600;
 }

@@ -77,8 +77,15 @@ The `index.html` redirects to `attack-network.html` by default.
 │  mappings/    decoders.js, loaders.js                    │
 │  workers/     packetWorkerManager.js                     │
 │  plugins/     d3-fisheye.js                              │
+│  search/      pattern-language.js (DSL tokenizer/parser/  │
+│               compiler/matcher), pattern-presets.js,     │
+│               pattern-search-engine.js,                  │
+│               flow-abstractor.js, search-results.js,     │
+│               pattern-ast-to-blocks.js, blocks-to-dsl.js │
 │  ui/          legend.js, bifocal-handles.js              │
 │               loading-indicator.js                       │
+│               pattern-search-panel.js,                   │
+│               pattern-builder-popup.js/.css               │
 │  utils/       formatters.js, helpers.js                  │
 │  config/      constants.js                               │
 └──────────────────────────────────────────────────────────┘
@@ -431,6 +438,7 @@ The visualization uses a sophisticated layout system to prevent overlapping when
 // collapsedIPs: Set<ip> - IPs whose sub-rows are collapsed
 // subRowHeights: Map<"ip|pairKey", number> - per-sub-row effective height (null when separateFlags off)
 // subRowOffsets: Map<"ip|pairKey", number> - per-sub-row cumulative Y offset from baseY (null when separateFlags off)
+// state.search.newlyAddedIPs: Set<ip> - IPs added by "Select IPs" action (gold-highlighted until cleared)
 ```
 
 **IMPORTANT — `ipPairOrderByRow` must be updated in-place**:
@@ -519,6 +527,140 @@ Box selection allows users to select packets on circle rows for raw CSV export:
 - `redrawAllBoxSelections()` — clears and recreates all visuals from stored data
 - `exportBoxSelectionCSV(selection)` — async; loads raw packets, filters by IP pair, downloads CSV
 
+### Pattern Search System (tcp-analysis.js, src/search/)
+
+The Pattern Search feature allows searching for TCP packet patterns across flows using a custom DSL.
+
+**Architecture:**
+- `src/search/pattern-language.js` — Tokenizer, parser, compiler, and matcher for the DSL
+- `src/search/pattern-presets.js` — Built-in preset patterns (e.g., "Full Graceful Close", "SYN Flood")
+- `src/search/pattern-search-engine.js` — Orchestrates search across flow data from `FlowListLoader`
+- `src/search/flow-abstractor.js` — Converts embedded packet arrays to abstract event sequences for matching
+- `src/search/search-results.js` — Stores match results with per-IP-pair match counts
+- `src/ui/pattern-search-panel.js` — Search panel UI in the Control Panel
+- `src/ui/pattern-builder-popup.js` — Visual pattern builder popup (block-based)
+
+**DSL Grammar** (simplified):
+```
+pattern   := sequence ('|' sequence)*      # disjunction (OR)
+sequence  := element ('->' element)*       # strict adjacency
+element   := '!'? atom quantifier?         # negation + quantifier
+atom      := event_name constraint? | '(' pattern ')' | '.' | '*' | '$' | '^'
+quantifier := '+' | '?' | '{' min (',' max?)? '}'
+constraint := '[' key op value (',' key op value)* ']'
+```
+
+Key semantics:
+- `->` means **strict adjacency** — no events allowed between elements unless explicitly matched
+- `.` and `*` are both wildcard atoms (match any single event)
+- `ACK{0,}` = zero or more ACKs (greedy with backtracking)
+- `!SYN_ACK` = negative lookahead (does NOT consume an event)
+- `$` = end-of-sequence anchor (matches only at end; does NOT consume an event)
+- `^` = start-of-sequence anchor (matches only at position 0; does NOT consume an event)
+- Both `^` and `$` are zero-width assertions — they bypass the quantifier loop in `compileElement()` since repeating a position check is meaningless
+- Constraints: `[dir=out]`, `[dt>1s]`, `[dir=in,dt<50ms]`
+
+**DSL Implementation Details** (`src/search/pattern-language.js`):
+- **Tokenizer**: Token types include `IDENT`, `ARROW`, `PIPE`, `LBRACE`, `RBRACE`, `DOT`, `STAR`, `BANG`, `DOLLAR`, `CARET`, `LBRACKET`, `RBRACKET`, `LPAREN`, `RPAREN`, `PLUS`, `QUESTION`, `COMMA`, `NUMBER`, `EOF`
+- **`^` (StartAnchor)**: Compiled to `(seq, start) => ({ matched: start === 0, endIndex: start })`. Zero-width — only succeeds at position 0. `matchPattern()` scanner still iterates all start positions, but `^` ensures only position 0 can match.
+- **`$` (EndAnchor)**: Compiled to `(seq, start) => ({ matched: start === seq.length, endIndex: start })`. Only succeeds at end of sequence.
+- **`compileElement()` bypass**: Both `StartAnchor` and `EndAnchor` skip the quantifier loop — `if (atom.type === 'EndAnchor' || atom.type === 'StartAnchor') return atomMatcher;`
+
+**Abstraction Levels:**
+- Level 1 (Packet): Each packet → `{ flagType, dir, deltaTime }`. Matches against individual packets.
+- Level 2 (Phase): Groups consecutive packets by TCP phase → `{ phase, packetCount, duration }`.
+- Level 3 (Outcome): Single event per flow → `{ outcome }` (e.g., `COMPLETE_GRACEFUL`).
+
+**Flag Classification Pipeline** (Level 1):
+1. `flow-list-loader.js` parses `packets` column → `{ flags: number (bitmask), _fromInitiator: boolean, timestamp }`
+2. `flow-abstractor.js:abstractToLevel1()` calls `classifyFlags(flags)` → display name (e.g., `'RST+ACK'`)
+3. `FLAG_TO_DSL` map converts to DSL token name (e.g., `'RST+ACK'` → `'RST_ACK'`)
+4. Key bitmask → DSL mappings: `0x02` → `SYN`, `0x12` → `SYN_ACK`, `0x10` → `ACK`, `0x18` → `PSH_ACK`, `0x04` → `RST`, `0x14` → `RST_ACK`, `0x11` → `FIN_ACK`, `0x19` → `ACK_FIN_PSH`
+
+**Match behavior** (`matchPattern()` in `pattern-language.js:584-618`):
+- Scans all starting positions in the abstracted sequence
+- Reports **first match only** per flow (`break` at line 603)
+- Match region `{start, end}` points to positions in the abstracted sequence
+
+**"Select IPs" behavior** (`selectMatchedIPsInSidebar()` in `tcp-analysis.js`):
+- **Additive only**: checks matched IPs that aren't already checked; never unchecks existing IPs
+- Tracks newly added IPs in `state.search.newlyAddedIPs` (Set)
+- Newly added IP labels get `.newly-added` CSS class (gold `#f1c40f`, bold) — applied via `applySearchHighlightClasses()`
+- Newly added multi-pair IPs are auto-collapsed (added to `state.layout.collapsedIPs`)
+- Golden highlights persist until: `clearPatternSearch()`, new search started, or manual IP checkbox change
+
+**Important — `.node-label` elements live in `svg`, not `mainGroup`:**
+IP labels (`.node-label`) are appended by `svgSetup.js` as children of `.node` groups directly under the `<svg>` element. The `mainGroup` is a separate clipped `<g>` for chart marks. When selecting `.node-label` elements, use `d3.select(svg.node()).selectAll('.node-label')` or traverse up via `mainGroup.node().closest('svg')`.
+
+**Pattern Builder Popup** (`src/ui/pattern-builder-popup.js`, `pattern-builder-popup.css`):
+- Visual block-based pattern builder with drag-and-drop colored pills
+- **Flag palette** — colored buttons for each TCP flag type (SYN, SYN+ACK, ACK, PSH+ACK, ACK+FIN+PSH, FIN+ACK, RST, RST+ACK)
+- **Symbols row** (`.pb-symbols`) — separate row below the flag palette with:
+  - `^` button — adds start anchor block
+  - `$` button — adds end anchor block
+  - `·` (wildcard) — adds a `.` wildcard block (moved here from flag palette)
+  - `( | )` button — opens the group creator dialog
+- **Group creator** (`_openGroupCreator()`) — modal dialog for building `(A | B)` alternation groups:
+  - 2-4 alternative rows, each with a mini flag palette and removable pills
+  - "Add Alternative" button (if < 4 rows), "Create" and "Cancel" buttons
+  - Produces a `GROUP` block with `alternatives: PatternBlock[][]`
+- **Block-to-DSL conversion** (`src/search/blocks-to-dsl.js`): Serializes PatternBlock[] to DSL string. Anchors (`^`, `$`) emit raw characters. Groups emit `(alt1 | alt2)` syntax.
+- **AST-to-block conversion** (`src/search/pattern-ast-to-blocks.js`): Converts parsed AST back to visual blocks for preset loading. Handles `StartAnchor`, `EndAnchor`, `Group`, `Wildcard`, negation, quantifiers, and constraints.
+
+**Current Level 1 Presets** (`src/search/pattern-presets.js`):
+
+| Preset | Pattern | Notes |
+|--------|---------|-------|
+| Full Graceful Close | `SYN -> SYN_ACK -> ACK -> .{1,} -> (FIN_ACK \| ACK_FIN_PSH) -> ACK{1,} -> $` | Complete TCP lifecycle. 99+% match rate for graceful flows. |
+| Full Abortive Connection | `SYN -> SYN_ACK -> ACK -> .{1,} -> (RST \| RST_ACK) -> $` | Handshake + data + RST. Matches both RST (0x04) and RST_ACK (0x14). |
+| SYN Retransmit (no SYN+ACK) | `SYN -> SYN` | Consecutive SYNs without server response. |
+| RST During Handshake | `SYN -> SYN_ACK -> RST` | RST after SYN_ACK but before ACK. |
+| SYN Rejected (RST+ACK) | `SYN -> RST_ACK` | Server immediately rejects with RST+ACK. |
+| SYN+ACK Retransmit | `SYN_ACK -> SYN_ACK` | Repeated SYN_ACK (server retry). |
+| SYN Flood (5+ SYNs) | `SYN{5,}` | 5 or more consecutive SYN packets. |
+| RST Flood (3+ consecutive) | `RST{3,}` | 3 or more consecutive RST packets. |
+
+**Full Graceful Close pattern details:**
+The `.{1,}` wildcard bridges the variable-length data phase; greedy backtracking finds the last FIN-bearing packet before the final ACKs. The `(FIN_ACK | ACK_FIN_PSH)` disjunction covers both standard FIN (95.1%) and piggybacked FIN-on-data (4.9%). `ACK{1,}` handles one or more trailing acknowledgments. The `$` end anchor ensures the graceful close is the **last** thing in the flow — without it, abortive flows containing a mid-flow FIN_ACK→ACK before a trailing RST would false-positive.
+
+**Full Abortive Connection pattern details:**
+Uses `(RST | RST_ACK)` because `classifyFlags()` in `flags.js` maps `0x04` → `RST` and `0x14` → `RST_ACK` as distinct DSL tokens, while the Python flow detector (`tcp_data_loader_streaming_by_ip_pair.py`) treats both as `closeType = 'abortive'`. Without the disjunction, flows ending with RST+ACK would be missed.
+
+### Overview Chart vs Pattern Search Count Mismatch
+
+**Level 1 pattern search results will NOT match overview chart legend counts exactly.** This is a systemic architectural difference, not a bug.
+
+**Root cause — two different classification systems:**
+
+1. **Overview chart** uses pre-aggregated flow bins (`flow_bins_*.json`) generated by `generate_flow_bins_v3.py`, which reads `closeType` and `invalidReason` from the Python flow detector's **state-based** classification. The Python detector (`tcp_data_loader_streaming_by_ip_pair.py:322-330`) classifies by TCP state machine:
+   - Any RST after handshake → `closeType = 'abortive'` (regardless of exact flag combo)
+   - Any RST during establishing → `invalidReason = 'rst_during_handshake'` (regardless of packet order)
+
+2. **Pattern search** uses Level 1 DSL matching against the actual packet sequence from flow_list CSVs via `flow-abstractor.js`. It requires **exact packet-level adjacency** — `SYN -> SYN_ACK -> RST` means precisely those three flags in that order with nothing between them.
+
+**Specific mismatches verified by diagnostic scripts (`scripts/diagnose_*.js`):**
+
+| Overview Category | Overview Count (all IPs) | Pattern Match | Gap | Main Causes |
+|---|---|---|---|---|
+| `abortive` | 29,788 | 29,618 | 170 | Reversed handshake (SYN_ACK before SYN): 145; RST not last: 5; missing SYN: 6 |
+| `rst_during_handshake` | 451,671 | 405,309 | 46,362 | `SYN -> RST_ACK` (45,007) counted as rst_during_hs by Python but matched by separate "SYN Rejected" preset |
+
+**Key flag classification detail** (`src/tcp/flags.js:classifyFlags()`):
+- `RST` (flags `0x04`) and `RST+ACK` (flags `0x14`) are **distinct** DSL tokens (`RST` vs `RST_ACK`)
+- The Python detector does not distinguish them — both trigger the same state transition
+- Patterns must use `(RST | RST_ACK)` to match both variants
+
+**Common packet sequence anomalies that cause mismatches:**
+- **Reversed handshake** — `SYN_ACK -> SYN -> ACK` instead of `SYN -> SYN_ACK -> ACK` (capture timing/reordering). ~85% of abortive mismatches.
+- **SYN retransmits** — `SYN -> SYN_ACK -> SYN -> SYN_ACK -> ACK` (duplicate handshake packets break strict adjacency)
+- **RST not terminal** — `... -> RST -> FIN_ACK` (trailing packet after RST breaks `$` anchor)
+- **Broader Python categories** — `rst_during_handshake` includes both `SYN -> SYN_ACK -> RST` and `SYN -> RST_ACK`; these are separate presets in Level 1
+
+**Implication for future work:**
+- Level 3 (Outcome) presets would match overview counts 1:1 since they use the same `closeType`/`invalidReason` fields via `flowToOutcome()` in `flags.js`
+- Level 1 presets are for precise packet-sequence analysis, not for reproducing overview totals
+- To match overview exactly at Level 1, composite patterns would be needed: e.g., `(SYN -> SYN_ACK -> RST) | (SYN -> RST_ACK) | (SYN -> RST) | (SYN_ACK -> SYN -> RST)`
+
 ### Shared Highlight Logic
 
 `src/rendering/highlightUtils.js` provides shared hover highlight functions used by both timearcs (`arcInteractions.js`) and force layout (`force_network.js`):
@@ -566,7 +708,8 @@ Main files import heavily from `/src`:
 - **Scales**: `scaleFactory.js`, `distortion.js`, `bifocal.js`
 - **Ground Truth**: `groundTruth.js`
 - **Utils**: `formatters.js` (byte/timestamp formatting), `helpers.js`
-- **UI**: `legend.js`, `bifocal-handles.js`, `loading-indicator.js`
+- **UI**: `legend.js`, `bifocal-handles.js`, `loading-indicator.js`, `pattern-search-panel.js`, `pattern-builder-popup.js`
+- **Search**: `pattern-language.js` (DSL), `pattern-search-engine.js`, `pattern-presets.js`, `flow-abstractor.js`, `search-results.js`
 - **Config**: `constants.js` (colors, sizes, debug flags)
 
 ## Original TimeArcs Source

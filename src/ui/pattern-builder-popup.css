@@ -1,0 +1,867 @@
+/* src/ui/pattern-builder-popup.css
+   Styles for the floating visual pattern builder popup.
+   All selectors use the .pb- prefix to avoid collisions. */
+
+/* ─── Popup container ──────────────────────────────────────────────────── */
+
+#patternBuilderPopup {
+    position: fixed;
+    z-index: 1500;
+    width: 480px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18), 0 1px 6px rgba(0, 0, 0, 0.10);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 12px;
+    color: #333;
+    /* Default position — JS will override on first open */
+    top: 80px;
+    right: 20px;
+    left: auto;
+    /* Prevent text selection during drag */
+    user-select: none;
+}
+
+.pb-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* ─── Titlebar / drag handle ───────────────────────────────────────────── */
+
+.pb-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #e9ecef;
+    border-radius: 8px 8px 0 0;
+    padding: 8px 12px;
+    cursor: move;
+    flex-shrink: 0;
+}
+
+.pb-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #343a40;
+}
+
+.pb-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    color: #6c757d;
+    line-height: 1;
+    padding: 0 2px;
+    border-radius: 3px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.pb-close:hover {
+    color: #343a40;
+    background: #ced4da;
+}
+
+/* ─── Body / scroll area ───────────────────────────────────────────────── */
+
+.pb-body {
+    padding: 10px 12px 12px;
+    overflow-y: auto;
+    max-height: calc(90vh - 60px);
+    position: relative;
+}
+
+/* ─── Sections ─────────────────────────────────────────────────────────── */
+
+.pb-section {
+    margin-bottom: 10px;
+}
+
+.pb-section:last-child {
+    margin-bottom: 0;
+}
+
+.pb-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* ─── Level / Scope radio rows ─────────────────────────────────────────── */
+
+.pb-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 5px;
+}
+
+.pb-row-label {
+    font-size: 11px;
+    color: #555;
+    min-width: 40px;
+    flex-shrink: 0;
+}
+
+.pb-radio-label {
+    font-size: 11px;
+    color: #333;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+}
+
+.pb-radio-label.pb-disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* ─── Preset select ────────────────────────────────────────────────────── */
+
+.pb-select {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 11px;
+    background: #fff;
+    color: #333;
+}
+
+/* ─── Palette ──────────────────────────────────────────────────────────── */
+
+.pb-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 8px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+}
+
+.pb-palette-block {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    border: none;
+    outline: none;
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+    white-space: nowrap;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    letter-spacing: 0.01em;
+}
+
+.pb-palette-block:hover {
+    transform: scale(1.08);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.pb-palette-block:active {
+    transform: scale(0.96);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* ─── Sequence area ────────────────────────────────────────────────────── */
+
+.pb-sequence-section {
+    /* inherits .pb-section */
+}
+
+.pb-sequence-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 5px;
+}
+
+.pb-clear-pattern-btn {
+    background: none;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 10px;
+    color: #6c757d;
+    cursor: pointer;
+    padding: 2px 6px;
+    transition: background 0.15s, color 0.15s;
+}
+
+.pb-clear-pattern-btn:hover {
+    background: #e9ecef;
+    color: #343a40;
+}
+
+.pb-sequence {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    min-height: 52px;
+    background: #f0f2f5;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+    padding: 6px 8px;
+    overflow-x: auto;
+    gap: 4px;
+    flex-wrap: nowrap;
+}
+
+.pb-sequence-hint {
+    font-size: 11px;
+    color: #adb5bd;
+    font-style: italic;
+    padding: 4px 0;
+}
+
+/* Individual sequence block wrapper */
+.pb-seq-item {
+    display: inline-flex;
+    align-items: center;
+    flex-direction: row;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+/* Arrow between blocks */
+.pb-seq-arrow {
+    font-size: 13px;
+    color: #adb5bd;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+/* The colored pill for a sequence block */
+.pb-seq-block {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 9px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    border: 2px solid transparent;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: border-color 0.1s ease, box-shadow 0.1s ease;
+    white-space: nowrap;
+    min-width: 28px;
+}
+
+.pb-seq-block:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+}
+
+/* Selected block gets a blue ring */
+.pb-seq-block.pb-selected {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+}
+
+/* Negated block: dashed red ring */
+.pb-seq-block.pb-negated {
+    border: 2px dashed #dc3545;
+}
+
+.pb-seq-block.pb-negated.pb-selected {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+}
+
+/* Remove button revealed on block hover */
+.pb-remove-btn {
+    display: none;
+    position: absolute;
+    top: -7px;
+    left: -7px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #dc3545;
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: 9px;
+    line-height: 16px;
+    text-align: center;
+    padding: 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+    z-index: 1;
+}
+
+.pb-seq-block:hover .pb-remove-btn {
+    display: block;
+}
+
+/* Quantifier badge: small dark badge top-right */
+.pb-quant-badge {
+    position: absolute;
+    top: -7px;
+    right: -5px;
+    background: #212529;
+    color: #fff;
+    font-size: 8px;
+    font-weight: 700;
+    border-radius: 3px;
+    padding: 1px 3px;
+    line-height: 1.2;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+/* ─── Group block (parenthesized alternatives) ────────────────────────── */
+
+.pb-seq-group {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 2px solid #adb5bd;
+    background: #f8f9fa;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    transition: border-color 0.1s ease, box-shadow 0.1s ease;
+    white-space: nowrap;
+}
+
+.pb-seq-group:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    border-color: #868e96;
+}
+
+.pb-seq-group.pb-selected {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+}
+
+.pb-seq-group.pb-negated {
+    border: 2px dashed #dc3545;
+}
+
+.pb-seq-group.pb-negated.pb-selected {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+}
+
+.pb-seq-group:hover .pb-remove-btn {
+    display: block;
+}
+
+.pb-seq-group-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.pb-seq-group-pipe {
+    font-size: 12px;
+    font-weight: 700;
+    color: #868e96;
+    margin: 0 1px;
+    line-height: 1;
+}
+
+.pb-seq-group-arrow {
+    font-size: 10px;
+    color: #adb5bd;
+    line-height: 1;
+}
+
+/* ─── Fallback DSL display (for disjunction presets) ───────────────────── */
+
+.pb-fallback-dsl {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 11px;
+    color: #495057;
+    resize: none;
+    outline: none;
+}
+
+/* ─── DSL preview ──────────────────────────────────────────────────────── */
+
+.pb-dsl-preview {
+    margin-top: 6px;
+    padding: 5px 8px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    border-left: 3px solid #dee2e6;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 11px;
+    color: #495057;
+    word-break: break-all;
+    min-height: 22px;
+    transition: border-color 0.2s ease;
+}
+
+.pb-dsl-preview.pb-dsl-valid {
+    border-left-color: #28a745;
+    color: #155724;
+}
+
+.pb-dsl-preview.pb-dsl-invalid {
+    border-left-color: #dc3545;
+    color: #721c24;
+}
+
+.pb-dsl-placeholder {
+    color: #adb5bd;
+    font-style: italic;
+}
+
+/* ─── Action buttons ───────────────────────────────────────────────────── */
+
+.pb-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* Reuse existing cp-btn styles but also define standalone versions */
+.pb-btn {
+    padding: 5px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    border: 1px solid #ced4da;
+    background: #fff;
+    color: #495057;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pb-btn:hover {
+    background: #e9ecef;
+    border-color: #adb5bd;
+}
+
+.pb-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.pb-btn-primary {
+    background: #0d6efd;
+    border-color: #0d6efd;
+    color: #fff;
+}
+
+.pb-btn-primary:hover:not(:disabled) {
+    background: #0b5ed7;
+    border-color: #0a58ca;
+}
+
+/* ─── Progress bar ─────────────────────────────────────────────────────── */
+
+.pb-progress {
+    margin: 2px 0;
+    padding: 2px 0;
+}
+
+.pb-progress-track {
+    width: 100%;
+    height: 4px;
+    background: #e9ecef;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 3px;
+}
+
+.pb-progress-bar {
+    height: 100%;
+    background: #f1c40f;
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.2s ease;
+}
+
+.pb-progress-label {
+    font-size: 10px;
+    color: #666;
+}
+
+/* ─── Results ──────────────────────────────────────────────────────────── */
+
+.pb-results {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 11px;
+    color: #333;
+}
+
+.pb-summary {
+    margin-bottom: 5px;
+    line-height: 1.5;
+}
+
+.pb-result-buttons {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+}
+
+.pb-error {
+    color: #dc3545;
+    font-size: 11px;
+}
+
+.pb-filter-row {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #333;
+    cursor: pointer;
+}
+
+.pb-filter-row input[type="checkbox"] {
+    cursor: pointer;
+}
+
+/* ─── Constraint popover ───────────────────────────────────────────────── */
+
+.pb-constraint-popover {
+    position: absolute;
+    z-index: 1600;
+    width: 220px;
+    background: #fff;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 1px 4px rgba(0, 0, 0, 0.10);
+    border: 1px solid #dee2e6;
+    padding: 10px 12px 10px;
+    font-size: 11px;
+    color: #333;
+}
+
+.pb-popover-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #212529;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #e9ecef;
+    padding-bottom: 5px;
+}
+
+.pb-popover-section {
+    margin-bottom: 8px;
+}
+
+.pb-popover-section-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #6c757d;
+    margin-bottom: 4px;
+}
+
+.pb-popover-radio-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 3px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.pb-popover-range-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    font-size: 11px;
+}
+
+.pb-popover-range-row input[type="number"] {
+    width: 48px;
+    padding: 2px 4px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 11px;
+    text-align: center;
+}
+
+.pb-popover-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    font-size: 11px;
+}
+
+.pb-popover-row select {
+    padding: 2px 4px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 11px;
+    background: #fff;
+}
+
+.pb-popover-row input[type="text"] {
+    flex: 1;
+    padding: 2px 5px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 11px;
+}
+
+.pb-popover-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-top: 2px;
+}
+
+.pb-popover-done-btn {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    padding: 5px 0;
+    background: #0d6efd;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.pb-popover-done-btn:hover {
+    background: #0b5ed7;
+}
+
+/* ─── Symbols row ──────────────────────────────────────────────────────── */
+
+.pb-symbols {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 6px 8px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+}
+
+.pb-symbol-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #495057;
+    background: #fff;
+    border: 1.5px solid #adb5bd;
+    cursor: pointer;
+    transition: transform 0.1s ease, box-shadow 0.1s ease, border-color 0.1s ease;
+    white-space: nowrap;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.pb-symbol-btn:hover {
+    transform: scale(1.08);
+    border-color: #495057;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+.pb-symbol-btn:active {
+    transform: scale(0.96);
+}
+
+.pb-symbol-group-btn {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    letter-spacing: 0.02em;
+}
+
+/* ─── Group creator dialog ─────────────────────────────────────────────── */
+
+.pb-group-creator {
+    position: absolute;
+    z-index: 1600;
+    width: 280px;
+    background: #fff;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18), 0 1px 4px rgba(0, 0, 0, 0.10);
+    border: 1px solid #dee2e6;
+    padding: 10px 12px;
+    font-size: 11px;
+    color: #333;
+}
+
+.pb-gc-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #212529;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #e9ecef;
+    padding-bottom: 5px;
+}
+
+.pb-group-alt-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    padding: 4px 0;
+    border-bottom: 1px solid #f0f2f5;
+}
+
+.pb-group-alt-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: #6c757d;
+    min-width: 34px;
+    flex-shrink: 0;
+}
+
+.pb-group-alt-pills {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    min-height: 22px;
+    flex-wrap: wrap;
+}
+
+.pb-group-alt-hint {
+    font-size: 10px;
+    color: #adb5bd;
+    font-style: italic;
+}
+
+.pb-group-alt-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    transition: opacity 0.1s;
+}
+
+.pb-group-alt-pill:hover {
+    opacity: 0.7;
+}
+
+.pb-group-alt-arrow {
+    font-size: 10px;
+    color: #adb5bd;
+    line-height: 1;
+}
+
+.pb-group-alt-remove {
+    background: none;
+    border: none;
+    color: #dc3545;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+    flex-shrink: 0;
+    opacity: 0.6;
+    transition: opacity 0.1s;
+}
+
+.pb-group-alt-remove:hover {
+    opacity: 1;
+}
+
+.pb-group-alt-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 6px;
+    padding: 3px 0 3px 40px;
+}
+
+.pb-group-alt-flag-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 8px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    border: none;
+    outline: none;
+    transition: transform 0.1s ease;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.pb-group-alt-flag-btn:hover {
+    transform: scale(1.1);
+}
+
+.pb-group-alt-flag-btn:active {
+    transform: scale(0.94);
+}
+
+.pb-group-add-alt-btn {
+    display: block;
+    width: 100%;
+    padding: 4px 0;
+    margin: 4px 0;
+    background: none;
+    border: 1px dashed #adb5bd;
+    border-radius: 4px;
+    font-size: 10px;
+    color: #6c757d;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color 0.15s, color 0.15s;
+}
+
+.pb-group-add-alt-btn:hover {
+    border-color: #495057;
+    color: #495057;
+}
+
+.pb-gc-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    justify-content: flex-end;
+}

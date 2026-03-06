@@ -74,17 +74,18 @@ export const HANDSHAKE_TIMEOUT_MS = 3000;
 export const REORDER_WINDOW_PKTS = 6;
 export const REORDER_WINDOW_MS = 500;
 
-// Default TCP flag colors
+// Default TCP flag colors — kept in sync with flag_colors.json
 export const DEFAULT_FLAG_COLORS = {
-    'SYN': '#757575',
-    'SYN+ACK': '#f39c12',
-    'ACK': '#27ae60',
-    'FIN': '#8e44ad',
-    'FIN+ACK': '#9b59b6',
-    'RST': '#34495e',
-    'PSH+ACK': '#3498db',
-    'RST+ACK': '#c0392b',
-    'OTHER': '#2b2b2b'
+    'SYN':     '#757575',
+    'SYN+ACK': '#ff7f00',
+    'ACK':     '#b2df8a',
+    'PSH':     '#157256',
+    'PSH+ACK': '#1b9e77',
+    'FIN':     '#1f78b4',
+    'FIN+ACK': '#4aa3e0',
+    'RST':     '#7b3294',
+    'RST+ACK': '#c69bd9',
+    'OTHER':   '#2b2b2b'
 };
 
 // Flag curvature for arc paths (pixels of horizontal offset)

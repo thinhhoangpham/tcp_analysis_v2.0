@@ -82,6 +82,8 @@ import {
 } from './src/interaction/timearcsZoomHandler.js';
 import { createIPFilterController } from './src/interaction/ip-filter-controller.js';
 import { tryLoadFlowList, getFlowListLoader } from './src/data/flow-list-loader.js';
+import { PatternSearchEngine } from './src/search/pattern-search-engine.js';
+import { initPatternSearchUI, showSearchProgress, hideSearchProgress, showSearchResults, clearSearchResults as clearSearchResultsUI } from './src/ui/pattern-search-panel.js';
 
 // Multi-resolution support (optional - may not be available)
 let getMultiResData = null;
@@ -290,6 +292,17 @@ const state = {
         isPreBinned: false,       // Track if data is already pre-binned (from multi-resolution)
         version: 0,               // Increment when filtered data changes
         timeExtent: [0, 0]        // Global time extent for the dataset
+    },
+
+    // Pattern search
+    search: {
+        active: false,            // True when results are applied to visualization
+        engine: null,             // PatternSearchEngine instance
+        results: null,            // SearchResults instance
+        level: 1,                 // Active search level (1=Packet, 2=Phase, 3=Outcome)
+        scope: 'selected',        // 'selected' | 'all'
+        filterActive: false,      // When true, dim non-matching circles
+        newlyAddedIPs: new Set()  // IPs added by "Select IPs" (gold-highlighted until cleared)
     }
 };
 
@@ -751,6 +764,10 @@ function renderCirclesWithOptions(layer, binned, rScale, transitionOpts) {
         transitionOpts
     });
 
+    // Apply search highlight classes after circles are rendered
+    if (state.search && (state.search.active || state.search.newlyAddedIPs.size > 0)) {
+        applySearchHighlightClasses();
+    }
 }
 
 // Unified render function
@@ -1003,6 +1020,41 @@ function initializeBarVisualization() {
     // Window resize handler for responsive visualization
     setupWindowResizeHandler();
 
+    // ── Pattern Search Engine + UI ──────────────────────────────────────────
+    state.search.engine = new PatternSearchEngine({
+        getState: () => state,
+        getFlowListLoader: () => getFlowListLoader(),
+        getAdaptiveLoader: () => adaptiveOverviewLoader,
+        onProgress: (pct, label) => showSearchProgress(pct, label),
+        onResults: (results) => applySearchResults(results)
+    });
+
+    initPatternSearchUI(document.getElementById('patternSearchContainer'), {
+        onSearch: async (pattern, level, scope, timeRangeMode) => {
+            state.search.level = level;
+            state.search.scope = scope;
+            const timeRange = timeRangeMode === 'view' ? xScale.domain() : null;
+            if (state.search.engine) {
+                await state.search.engine.search(pattern, level, scope, timeRange);
+            }
+        },
+        onCancel: () => {
+            if (state.search.engine) state.search.engine.cancel();
+            hideSearchProgress();
+        },
+        onClear: () => {
+            clearPatternSearch();
+        },
+        onFilterToggle: (active) => {
+            state.search.filterActive = active;
+            reRenderCirclesWithSearchHighlight();
+        },
+        onSelectMatchedIPs: (ips) => {
+            selectMatchedIPsInSidebar(ips);
+        }
+    });
+    // ───────────────────────────────────────────────────────────────────────
+
     // Zoom In/Out button handlers (configurable zoom step per click)
     setupZoomButtons({
         getXScale: () => xScale,
@@ -1215,6 +1267,328 @@ function setupWindowResizeHandler() {
         onResize: handleResizeLogic
     });
 }
+
+// ── Pattern Search helpers ────────────────────────────────────────────────────
+
+/**
+ * Called by PatternSearchEngine.onResults — stores results and re-renders.
+ * @param {import('./src/search/search-results.js').SearchResults} results
+ */
+function applySearchResults(results) {
+    state.search.results = results;
+    state.search.active = !results.error && results.totalMatches > 0;
+
+    // Show results summary in the UI panel
+    showSearchResults(
+        results,
+        (flows) => {
+            // "View Flows" — open existing flow list modal with matched flows
+            try {
+                const overlay = document.getElementById('flowListModalOverlay');
+                if (overlay) {
+                    overlay.style.display = 'flex';
+                    sbCreateFlowListCapped(
+                        flows, state.flows.selectedIds,
+                        formatBytes, formatTimestamp,
+                        null, null, null,
+                        {}, null, flows.some(f => f._hasEmbeddedPackets)
+                    );
+                }
+            } catch (e) { logCatchError('applySearchResults.viewFlows', e); }
+        },
+        (ips) => selectMatchedIPsInSidebar(ips)
+    );
+
+    // Re-render circles to apply highlights
+    reRenderCirclesWithSearchHighlight();
+}
+
+/**
+ * Reset all search state and remove highlights.
+ */
+function clearPatternSearch() {
+    state.search.active = false;
+    state.search.results = null;
+    state.search.filterActive = false;
+    state.search.newlyAddedIPs.clear();
+    clearSearchResultsUI();
+    reRenderCirclesWithSearchHighlight();
+}
+
+/**
+ * Trigger a circle re-render so search highlight classes are applied.
+ * Uses the same pattern as other lightweight re-renders: re-call renderCircles
+ * on the existing dots layer if available.
+ */
+function reRenderCirclesWithSearchHighlight() {
+    // Applying classes after renderCircles is driven by the zoom/render pipeline.
+    // We request an immediate re-render by triggering the standard redraw.
+    try {
+        if (state.data.filtered && state.data.filtered.length > 0 && typeof visualizeTimeArcs === 'function') {
+            // Lightweight: only re-apply highlight classes to existing circles
+            applySearchHighlightClasses();
+        }
+    } catch (e) {
+        logCatchError('reRenderCirclesWithSearchHighlight', e);
+    }
+}
+
+/**
+ * Apply/remove search highlight styling based on current search state.
+ * Draws a golden box at the source IP row for each matched IP pair,
+ * with an arrow from the box's leading edge to the destination IP row.
+ */
+function applySearchHighlightClasses() {
+    if (!mainGroup) return;
+
+    const chartCol = document.getElementById('chart-column');
+
+    // Remove previous highlight visuals
+    mainGroup.selectAll('.search-highlight-box').remove();
+
+    // Apply/remove golden "newly added" label styling (independent of search active state).
+    // Labels live in the parent svg (not mainGroup), so select from svg.
+    const parentSvg = mainGroup.node()?.closest('svg');
+    if (parentSvg) {
+        d3.select(parentSvg).selectAll('.node-label').each(function() {
+            const el = d3.select(this);
+            const ip = el.text();
+            el.classed('newly-added', state.search.newlyAddedIPs && state.search.newlyAddedIPs.has(ip));
+        });
+    }
+
+    if (!state.search.active || !state.search.results) {
+        mainGroup.selectAll('.direction-dot').style('opacity', null);
+        if (chartCol) chartCol.classList.remove('search-filter-active');
+        return;
+    }
+
+    const matchedPairs = state.search.results.matchedIpPairs;
+    const filterActive = state.search.filterActive;
+    const ipPositions = state.layout.ipPositions;
+
+    // Collect x/y-extent of matched circles per (pairKey, srcIp) on the source row.
+    // Key by "pairKey|srcIp" so expanded sub-rows get individual boxes.
+    // pairBoxes: Map<compositeKey, { srcIp, dstIp, pairKey, minX, maxX, minY, maxY, maxR }>
+    const pairBoxes = new Map();
+
+    mainGroup.selectAll('.direction-dot').each(function(d) {
+        if (!d) return;
+        const isCollapsed = d.ipPairKey === '__collapsed__';
+        let pairKey, isMatch;
+
+        let dstIp = d.dst_ip;
+        if (isCollapsed) {
+            // Collapsed circles merge multiple pairs — check if ANY merged pair matches
+            const pairs = d.ipPairs || [];
+            const matchedPair = pairs.find(p => {
+                const pk = makeIpPairKey(p.src_ip, p.dst_ip);
+                return matchedPairs.has(pk);
+            });
+            isMatch = !!matchedPair;
+            // Use the matched pair for box grouping and arrow destination
+            pairKey = matchedPair ? makeIpPairKey(matchedPair.src_ip, matchedPair.dst_ip) : null;
+            if (matchedPair) dstIp = matchedPair.dst_ip;
+        } else {
+            pairKey = d.ipPairKey || (d.src_ip && d.dst_ip
+                ? (d.src_ip < d.dst_ip ? `${d.src_ip}<->${d.dst_ip}` : `${d.dst_ip}<->${d.src_ip}`)
+                : null);
+            isMatch = pairKey && matchedPairs.has(pairKey);
+        }
+
+        const el = d3.select(this);
+
+        if (isMatch) {
+            const cx = +el.attr('cx'), cy = +el.attr('cy'), r = +el.attr('r') || 3;
+            // Group by pairKey + srcIp so each source sub-row gets its own box
+            const boxKey = `${pairKey}|${d.src_ip}`;
+            if (!pairBoxes.has(boxKey)) {
+                pairBoxes.set(boxKey, {
+                    srcIp: d.src_ip, dstIp: dstIp, pairKey,
+                    minX: cx - r, maxX: cx + r,
+                    minY: cy - r, maxY: cy + r, maxR: r
+                });
+            } else {
+                const b = pairBoxes.get(boxKey);
+                b.minX = Math.min(b.minX, cx - r);
+                b.maxX = Math.max(b.maxX, cx + r);
+                b.minY = Math.min(b.minY, cy - r);
+                b.maxY = Math.max(b.maxY, cy + r);
+                b.maxR = Math.max(b.maxR, r);
+            }
+            el.style('opacity', null);
+        } else {
+            el.style('opacity', filterActive ? 0.12 : null);
+        }
+    });
+
+    if (chartCol) {
+        if (filterActive) {
+            chartCol.classList.add('search-filter-active');
+        } else {
+            chartCol.classList.remove('search-filter-active');
+        }
+    }
+
+    // Only draw golden boxes + arrows when "Highlight matches only" is checked
+    if (!filterActive) return;
+
+    // Draw boxes + arrows
+    const firstCircleLayer = mainGroup.select('.full-domain-layer, .dynamic-layer').node();
+    const boxGroup = mainGroup.insert('g', firstCircleLayer ? () => firstCircleLayer : null)
+        .attr('class', 'search-highlight-box');
+
+    const padX = 4, padY = 2;
+    const arrowSize = 5;
+    const gold = '#f1c40f';
+
+    // Build a lookup of actual sub-row Y centers for destination arrows.
+    // For each (dstIp, pairKey), find the center Y of circles on that dst row.
+    const dstSubRowY = new Map(); // "dstIp|pairKey" → centerY
+    for (const [, b] of pairBoxes) {
+        // Each entry is keyed by srcIp; look for the counterpart keyed by dstIp
+        const dstKey = `${b.pairKey}|${b.dstIp}`;
+        if (pairBoxes.has(dstKey)) {
+            const db = pairBoxes.get(dstKey);
+            dstSubRowY.set(`${b.dstIp}|${b.pairKey}`, (db.minY + db.maxY) / 2);
+        }
+    }
+
+    const tooltip = d3.select('#tooltip');
+    const goldHover = '#e6a800';
+
+    for (const [, b] of pairBoxes) {
+        // Box spans the actual Y extent of matched circles on this sub-row
+        const boxY = b.minY - padY;
+        const boxH = (b.maxY - b.minY) + padY * 2;
+        const srcCenterY = (b.minY + b.maxY) / 2;
+
+        // Wrap each pair's visuals in a group for coordinated hover highlighting
+        const pairG = boxGroup.append('g')
+            .attr('class', 'search-highlight-pair');
+
+        // Golden box on the source IP sub-row
+        pairG.append('rect')
+            .attr('class', 'search-box-rect')
+            .attr('x', b.minX - padX)
+            .attr('y', boxY)
+            .attr('width', b.maxX - b.minX + padX * 2)
+            .attr('height', boxH)
+            .attr('rx', 3)
+            .attr('ry', 3)
+            .attr('fill', 'rgba(241, 196, 15, 0.15)')
+            .attr('stroke', gold)
+            .attr('stroke-width', 1.5)
+            .attr('pointer-events', 'visiblePainted');
+
+        // Arrow from box leading edge to destination IP sub-row
+        const dstCenterY = dstSubRowY.get(`${b.dstIp}|${b.pairKey}`)
+            ?? ipPositions.get(b.dstIp);
+        if (dstCenterY != null && dstCenterY !== srcCenterY) {
+            const arrowX = b.minX - padX;
+            const arrowStartY = srcCenterY;
+            const arrowEndY = dstCenterY;
+
+            // Stem line
+            pairG.append('line')
+                .attr('x1', arrowX).attr('y1', arrowStartY)
+                .attr('x2', arrowX).attr('y2', arrowEndY)
+                .attr('stroke', gold)
+                .attr('stroke-width', 1.5)
+                .attr('stroke-dasharray', '4,3')
+                .attr('pointer-events', 'none');
+
+            // Arrowhead at destination
+            const dir = arrowEndY > arrowStartY ? 1 : -1;
+            const tipY = arrowEndY;
+            const baseY_ = tipY - dir * arrowSize * 2;
+            pairG.append('polygon')
+                .attr('points', `${arrowX},${tipY} ${arrowX - arrowSize},${baseY_} ${arrowX + arrowSize},${baseY_}`)
+                .attr('fill', gold)
+                .attr('pointer-events', 'none');
+        }
+
+        // Hover handlers for this pair group
+        const matchCount = matchedPairs.get(b.pairKey) || 0;
+        const [ipA, ipB] = b.pairKey.split('<->');
+        pairG
+            .on('mouseover', function(event) {
+                // Brighten box and arrow
+                d3.select(this).select('.search-box-rect')
+                    .attr('fill', 'rgba(241, 196, 15, 0.35)')
+                    .attr('stroke', goldHover)
+                    .attr('stroke-width', 2.5);
+                d3.select(this).selectAll('line')
+                    .attr('stroke', goldHover)
+                    .attr('stroke-width', 2.5);
+                d3.select(this).selectAll('polygon')
+                    .attr('fill', goldHover);
+                // Tooltip
+                const html = `<b>Pattern Match</b><br>${ipA} &harr; ${ipB}<br>Matched flows: ${matchCount.toLocaleString()}`;
+                tooltip.style('display', 'block').html(html)
+                    .style('left', `${event.pageX + 16}px`)
+                    .style('top', `${event.pageY - 40}px`);
+            })
+            .on('mousemove', function(event) {
+                tooltip.style('left', `${event.pageX + 16}px`)
+                    .style('top', `${event.pageY - 40}px`);
+            })
+            .on('mouseout', function() {
+                // Restore default styling
+                d3.select(this).select('.search-box-rect')
+                    .attr('fill', 'rgba(241, 196, 15, 0.15)')
+                    .attr('stroke', gold)
+                    .attr('stroke-width', 1.5);
+                d3.select(this).selectAll('line')
+                    .attr('stroke', gold)
+                    .attr('stroke-width', 1.5);
+                d3.select(this).selectAll('polygon')
+                    .attr('fill', gold);
+                tooltip.style('display', 'none');
+            });
+    }
+}
+
+/**
+ * Programmatically check the IPs returned by "Select matched IPs" in the sidebar.
+ * @param {string[]} ips
+ */
+function selectMatchedIPsInSidebar(ips) {
+    if (!ips || ips.length === 0) return;
+    const ipSet = new Set(ips);
+    const newlyAdded = new Set();
+
+    // Additive only: check matched IPs that aren't already checked, never uncheck existing ones
+    document.querySelectorAll('#ipCheckboxes input[type="checkbox"]').forEach(cb => {
+        if (ipSet.has(cb.value) && !cb.checked) {
+            cb.checked = true;
+            newlyAdded.add(cb.value);
+        }
+    });
+
+    // Store newly added IPs for golden label highlighting
+    state.search.newlyAddedIPs = newlyAdded;
+
+    // Auto-collapse newly added multi-pair IPs so they don't explode the layout
+    if (newlyAdded.size > 0) {
+        const pairCounts = computeIPPairCounts(state.data.filtered.length > 0 ? state.data.filtered : state.data.full);
+        for (const ip of newlyAdded) {
+            if (pairCounts.get(ip) > 1) {
+                state.layout.collapsedIPs.add(ip);
+            }
+        }
+    }
+
+    // Trigger the IP filter update, preserving search results
+    try {
+        updateIPFilter({ fromSearch: true });
+    } catch (e) {
+        logCatchError('selectMatchedIPsInSidebar.updateIPFilter', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Global update functions that preserve zoom state
 let flowUpdateTimeout = null;
 
@@ -1959,6 +2333,7 @@ function drawSubRowArcs() {
                     flags: d.flags,
                     binned: d.binned,
                     binCenter: d.binCenter,
+                    binEnd: d.bin_end,
                     timestamp: d.timestamp,
                     yPosWithOffset: yPos
                 });
@@ -1983,71 +2358,38 @@ function drawSubRowArcs() {
             const dstY = getIPYWithSubRowOffset(circle.dst_ip, circle.src_ip, circle.dst_ip);
             if (srcY == null || dstY == null) continue;
 
-            const arcDatum = {
-                src_ip: circle.src_ip,
-                dst_ip: circle.dst_ip,
-                flagType: circle.flagType,
-                flags: circle.flags,
-                binned: circle.binned,
-                binCenter: circle.binCenter,
-                timestamp: circle.timestamp
-            };
+            // S-curve from circle position to dummy endpoint (matching hover arc style)
+            const x1 = xScale(circle.binCenter || circle.timestamp);
+            const binWidthPx = (circle.binCenter && circle.ts !== Infinity)
+                ? Math.max(20, Math.abs(xScale(circle.binEnd || circle.binCenter) - x1))
+                : 40;
+            const xDummy = x1 + Math.max(20, binWidthPx);
+            const midX = (x1 + xDummy) / 2;
 
-            const path = arcPathGenerator(arcDatum, {
-                xScale,
-                ipPositions: state.layout.ipPositions,
-                pairs: state.layout.pairs,
-                findIPPosition,
-                flagCurvature: FLAG_CURVATURE,
-                srcY,
-                dstY
-            });
-            if (!path) continue;
+            if (Math.abs(dstY - srcY) <= 1) continue;
 
             const color = flagColors[circle.flagType] || flagColors.OTHER || '#999';
-            const arcEl = mainGroup.append('path')
+
+            mainGroup.append('path')
                 .attr('class', 'sub-row-arc')
-                .attr('d', path)
+                .attr('d', `M${x1},${srcY} C${midX},${srcY} ${midX},${dstY} ${xDummy},${dstY}`)
                 .style('stroke', color)
                 .style('stroke-width', '2px')
                 .style('stroke-opacity', 0.8)
                 .style('fill', 'none')
                 .style('pointer-events', 'none');
 
-            // Add arrowhead at destination end (same style as hover arcs)
-            const pathNode = arcEl.node();
-            const totalLen = pathNode.getTotalLength();
-            const ARROW_BACK = 12;
-            if (totalLen > ARROW_BACK + 5) {
-                const sp = pathNode.getPointAtLength(totalLen - ARROW_BACK);
-                const ep = pathNode.getPointAtLength(totalLen);
-                const colorKey = color.replace(/[^a-zA-Z0-9]/g, '');
-                const markerId = `sub-row-arrow-${colorKey}`;
-                const svgEl = d3.select(mainGroup.node().ownerSVGElement);
-                let defs = svgEl.select('defs');
-                if (defs.empty()) defs = svgEl.insert('defs', ':first-child');
-                if (defs.select(`#${markerId}`).empty()) {
-                    defs.append('marker')
-                        .attr('id', markerId)
-                        .attr('viewBox', '0 0 10 10')
-                        .attr('refX', 10).attr('refY', 5)
-                        .attr('markerWidth', 8).attr('markerHeight', 8)
-                        .attr('markerUnits', 'userSpaceOnUse')
-                        .attr('orient', 'auto')
-                      .append('path')
-                        .attr('d', 'M0,0 L10,5 L0,10 Z')
-                        .attr('fill', color);
-                }
-                mainGroup.append('path')
-                    .attr('class', 'sub-row-arc')
-                    .attr('d', `M${sp.x},${sp.y} L${ep.x},${ep.y}`)
-                    .style('stroke', color)
-                    .style('stroke-width', '2px')
-                    .style('stroke-opacity', 0.8)
-                    .style('fill', 'none')
-                    .style('pointer-events', 'none')
-                    .attr('marker-end', `url(#${markerId})`);
-            }
+            // Polygon arrowhead at midpoint
+            const arrowLen = 5, arrowHalfW = 3;
+            const a = Math.atan2(2 * (dstY - srcY), xDummy - x1);
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const mx = midX, my = (srcY + dstY) / 2;
+            mainGroup.append('polygon')
+                .attr('class', 'sub-row-arc')
+                .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
+                .attr('fill', color)
+                .attr('fill-opacity', 0.8)
+                .style('pointer-events', 'none');
         }
     }
 }
@@ -2253,7 +2595,16 @@ function getIPFilterController() {
     return ipFilterController;
 }
 
-async function updateIPFilter() {
+async function updateIPFilter({ fromSearch = false } = {}) {
+    // Stale search results reference the previous IP selection — clear them
+    // unless the IP change was itself triggered by the search "Select IPs" action.
+    if (!fromSearch && state.search && state.search.active) {
+        clearPatternSearch();
+    }
+    // Manual IP checkbox changes clear the "newly added" golden highlights
+    if (!fromSearch && state.search.newlyAddedIPs.size > 0) {
+        state.search.newlyAddedIPs.clear();
+    }
     return getIPFilterController().updateIPFilter();
 }
 

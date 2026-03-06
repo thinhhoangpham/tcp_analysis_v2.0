@@ -131,6 +131,51 @@ export function getColoredFlagBadges(flagStats, flagColors) {
     }).join('');
 }
 
+// ─── Abstraction constants for pattern search ────────────────────────────────
+
+export const TCP_PHASES = {
+    HANDSHAKE: 'HANDSHAKE',
+    DATA: 'DATA',
+    FIN_CLOSE: 'FIN_CLOSE',
+    RST_CLOSE: 'RST_CLOSE'
+};
+
+export const FLOW_OUTCOMES = {
+    COMPLETE_GRACEFUL: 'COMPLETE_GRACEFUL',
+    COMPLETE_ABORTED: 'COMPLETE_ABORTED',
+    ONGOING: 'ONGOING',
+    RST_HANDSHAKE: 'RST_HANDSHAKE',
+    INVALID_ACK: 'INVALID_ACK',
+    INVALID_SYNACK: 'INVALID_SYNACK',
+    NO_SYNACK: 'NO_SYNACK',
+    NO_ACK: 'NO_ACK',
+    UNKNOWN_INVALID: 'UNKNOWN_INVALID'
+};
+
+/**
+ * Map a flow object to a FLOW_OUTCOMES constant.
+ * Reads closeType ('graceful','abortive','ongoing','invalid') and invalidReason.
+ * @param {Object} flow
+ * @returns {string} One of FLOW_OUTCOMES values
+ */
+export function flowToOutcome(flow) {
+    if (flow.closeType === 'graceful') return FLOW_OUTCOMES.COMPLETE_GRACEFUL;
+    if (flow.closeType === 'abortive') return FLOW_OUTCOMES.COMPLETE_ABORTED;
+    if (flow.closeType === 'ongoing')  return FLOW_OUTCOMES.ONGOING;
+    const reasonMap = {
+        rst_during_handshake: 'RST_HANDSHAKE',
+        invalid_ack:          'INVALID_ACK',
+        invalid_synack:       'INVALID_SYNACK',
+        incomplete_no_synack: 'NO_SYNACK',
+        incomplete_no_ack:    'NO_ACK',
+        unknown_invalid:      'UNKNOWN_INVALID'
+    };
+    const key = reasonMap[flow.invalidReason];
+    return key ? FLOW_OUTCOMES[key] : FLOW_OUTCOMES.UNKNOWN_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Get top N flags as summary string.
  * @param {Object} flagStats - {flagType: count}

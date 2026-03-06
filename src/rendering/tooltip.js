@@ -17,7 +17,7 @@ export function createTooltipHTML(data) {
         return normalizeProtocolValue(raw, PROTOCOL_MAP);
     }
 
-    if (data.binned && data.count > 1) {
+    if (data.binned && data.bin_start != null) {
         // Binned data tooltip
         const { utcTime } = formatTimestamp(data.timestamp);
         let tooltipContent = `<b>${data.flagType} (Binned)</b><br>`;
