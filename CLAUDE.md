@@ -104,15 +104,12 @@ The `index.html` redirects to `attack-network.html` by default.
 - When IPs are selected, `updateIPFilter()` is called (async function)
 - Uses adaptive multi-resolution loader (`flow_bins_index.json`) for efficient Overview Bar chart rendering
 - Falls back to `flow_bins.json` or chunk loading if multi-resolution not available
-- For v3 format (`chunked_flows_by_ip_pair`), filters chunks by IP pair first for efficiency
 - Passes filtered/aggregated data to `overview_chart.js` for categorization and binning
 
 ### Worker Pattern
 
 `packet_worker.js` handles packet filtering off the main thread:
-- Receives packets via `init` message
-- Filters by connection keys or IPs
-- Returns `Uint8Array` visibility mask
+- Receives packets via `init` message; filters by connection keys or IPs; returns `Uint8Array` visibility mask
 - Managed by `src/workers/packetWorkerManager.js`
 
 ## Configuration
@@ -123,10 +120,8 @@ The `index.html` redirects to `attack-network.html` by default.
 ### JSON Mapping Files
 
 - `full_ip_map.json` - IP address → descriptive name
-- `attack_group_mapping.json` - Attack type → category
-- `attack_group_color_mapping.json` - Category → color
-- `event_type_mapping.json` - Event → color
-- `flag_colors.json`, `flow_colors.json` - Visual styling
+- `attack_group_mapping.json` / `attack_group_color_mapping.json` - Attack type → category → color
+- `event_type_mapping.json`, `flag_colors.json`, `flow_colors.json` - Visual styling
 
 ## Data Formats
 
@@ -140,41 +135,20 @@ packets_data/attack_flows_day1to5/
 ├── manifest.json              # Dataset metadata (version 3.0, format, totals, time range)
 ├── flows/
 │   ├── pairs_meta.json        # IP pair index with per-pair chunk metadata
-│   └── by_pair/               # Flows organized by IP pair (efficient filtering)
-│       ├── 172-28-4-7__19-202-221-71/
-│       │   ├── chunk_00000.json
-│       │   ├── chunk_00001.json
-│       │   └── ...
-│       └── ...                # (574 IP pairs, 1318 total chunks)
+│   └── by_pair/               # Flows organized by IP pair (574 pairs, 1318 chunks)
 ├── indices/
 │   ├── bins.json              # Time bins with total packet counts
 │   ├── flow_bins.json         # Pre-aggregated flows by IP pair (single resolution)
 │   ├── flow_bins_index.json   # Multi-resolution index for adaptive loading
-│   ├── flow_bins_1s.json      # 1-second resolution bins (for zoomed views)
-│   ├── flow_bins_1min.json    # 1-minute resolution bins
-│   ├── flow_bins_10min.json   # 10-minute resolution bins
-│   ├── flow_bins_hour.json    # Hourly resolution bins
+│   ├── flow_bins_1s.json / flow_bins_1min.json / flow_bins_10min.json / flow_bins_hour.json
 │   └── flow_list/             # Flow summaries for flow list popup (lazy-loaded CSVs)
-│       ├── index.json         # IP pair index with file references
+│       ├── index.json         # IP pair index with file references (~87KB)
 │       └── *.csv              # Per-IP-pair CSV files (574 files, ~525MB total)
 └── ips/
-    ├── ip_stats.json          # Per-IP packet/byte counts
-    ├── flag_stats.json        # Global TCP flag distribution
-    └── unique_ips.json        # List of all IPs in dataset
+    ├── ip_stats.json / flag_stats.json / unique_ips.json
 ```
 
-**Legacy v2 format** (`chunked_flows`) also supported:
-```
-packets_data/attack_flows_day1to5_v2/
-├── manifest.json          # version 2.2, format: chunked_flows
-├── flows/
-│   ├── chunks_meta.json   # Flat chunk index
-│   ├── chunk_00000.json   # ~300 flows per chunk
-│   └── ...
-└── ...
-```
-
-The code auto-detects format from `manifest.json` and loads appropriately.
+Legacy v2 format (`chunked_flows`) also supported; code auto-detects from `manifest.json`.
 
 ## Key Implementation Details
 
@@ -187,157 +161,34 @@ Both compose modules from `/src` and maintain extensive internal state (IP posit
 
 ### TimearcsLayout Class
 
-`src/layout/timearcs_layout.js` (~1600 LOC) encapsulates the timearcs arc visualization, extracted from `attack-network.js`. Mirrors the `ForceNetworkLayout` pattern: one class with constructor options, separate `setData()` and `render()` calls, and pull-based context retrieval via callbacks.
+`src/layout/timearcs_layout.js` (~1600 LOC) encapsulates the timearcs arc visualization. Mirrors the `ForceNetworkLayout` pattern: constructor options, separate `setData()` and `render()` calls, pull-based context retrieval via callbacks.
 
-Key responsibilities:
-- Force simulation setup (component separation, hub attraction, y-constraints)
-- Arc rendering with gradient coloring by attack type
-- IP label layout and hover highlighting
-- Bifocal (focus+context) lens distortion
-- Drag-to-brush selection system
-- Animated transitions between layout modes
+Key responsibilities: force simulation, arc rendering (gradient by attack type), IP label layout, bifocal distortion, drag-to-brush selection, animated layout transitions.
 
-**Loading Bar** (`tcp-analysis.html`, `tcp-analysis.css`):
-- A progress bar is shown in `tcp-analysis.html` while data is loading on page open
-- Disappears once initial render completes
+**Loading Bar** (`tcp-analysis.html`, `tcp-analysis.css`): shown while data loads; disappears after initial render.
 
 ### Overview Bar chart
 
-The `overview_chart.js` module (~1100 LOC) provides:
-- Stacked bar overview of invalid flows by reason (the **Overview Bar chart**)
+`overview_chart.js` (~1100 LOC):
+- Stacked bar overview of flows by close type/invalid reason
 - Brush-based time range selection synced with Packet View zoom
-- Legend integration: clicking a legend item **hides/shows bars of that category and recomputes bar heights** based on the remaining visible data's max
+- Legend clicks hide/show categories and recompute bar heights (two-pass: new sharedMax, then restack)
 
-**Legend filter behavior** (`overview_chart.js`):
-- Module-level `overviewHiddenReasons` (Set) and `overviewHiddenCloseTypes` (Set) track legend-toggled visibility; these persist across chart recreations (e.g. IP filter changes)
-- Clicking a legend item toggles the appropriate set then calls `recomputeOverviewBars()`
-- `recomputeOverviewBars()` dispatches to `_recomputeFlows()` or `_recomputeAdaptive()` based on which rendering path is active
-- Two-pass recompute: (1) compute new `sharedMax` from visible-only categories, (2) restack y-positions per bin from scratch — required because stacking means hiding one bar shifts its neighbors
-- `_applyPositions()` applies results: `display:none` for hidden segments, animated 200ms y/height transitions for visible ones
-- Both the overview-local sets AND the main-app filter sets (`hiddenInvalidReasonsRef`/`hiddenCloseTypesRef`) are considered; `updateOverviewInvalidVisibility()` now calls `recomputeOverviewBars()` instead of CSS-only show/hide
+**Legend filter behavior**: Module-level `overviewHiddenReasons` / `overviewHiddenCloseTypes` Sets persist across IP filter changes. `recomputeOverviewBars()` dispatches to `_recomputeFlows()` or `_recomputeAdaptive()`. `_applyPositions()` applies 200ms animated transitions. Both overview-local sets AND main-app sets (`hiddenInvalidReasonsRef`/`hiddenCloseTypesRef`) are considered.
 
-**Current Implementation** (Multi-resolution adaptive loading):
-- `tcp-analysis.js` initializes `AdaptiveOverviewLoader` from `flow_bins_index.json`
-- Loader selects appropriate resolution based on visible time range (hour → 10min → 1min)
-- Filters pre-aggregated flow bins by selected IP pairs
-- Creates synthetic flows from bin data for Overview Bar chart
-- **Fallback chain**: adaptive loader → `flow_bins.json` → chunk loading
-
-**Multi-resolution index** (`flow_bins_index.json`):
-```json
-{
-  "resolutions": {
-    "1s": { "file": "flow_bins_1s.json", "bin_width_us": 1000000, "use_when_range_minutes_lte": 10 },
-    "1min": { "file": "flow_bins_1min.json", "bin_width_us": 60000000, "use_when_range_minutes_lte": 120 },
-    "10min": { "file": "flow_bins_10min.json", "bin_width_us": 600000000, "use_when_range_minutes_lte": 7200 },
-    "hour": { "file": "flow_bins_hour.json", "bin_width_us": 3600000000, "use_when_range_minutes_gt": 7200 }
-  }
-}
-```
-
-**flow_bins.json Structure** (per resolution):
-```json
-[
-  {
-    "bin": 0,
-    "start": 1257254652674641,
-    "end": 1257258647167936,
-    "flows_by_ip_pair": {
-      "172.28.1.134<->152.162.178.254": {
-        "graceful": 1,
-        "abortive": 5,
-        "invalid": {
-          "rst_during_handshake": 290,
-          "invalid_ack": 2,
-          "incomplete_no_synack": 1
-        },
-        "ongoing": 10
-      }
-    }
-  }
-]
-```
-
-**Benefits**:
-- **Adaptive resolution**: Coarse bins for overview, fine bins when zoomed
-- **Instant loading**: Small files vs. thousands of chunk files
-- **Efficient filtering**: Pre-aggregated by IP pair
-- **Reduced memory**: No need to load full flow objects for overview
+**Adaptive loading**: `AdaptiveOverviewLoader` initialized from `flow_bins_index.json`. Picks resolution by visible range: 1s (≤10min), 1min (≤120min), 10min (≤7200min), hour (>7200min). Fallback: adaptive → `flow_bins.json` → chunk loading.
 
 ### Flow List CSV Files (Lazy Loading)
 
-For deployments where chunk files are too large (e.g., GitHub Pages), generate per-IP-pair CSV files. Two scripts are available:
+Per-IP-pair CSVs in `indices/flow_list/`. Only `index.json` loaded at startup. CSVs fetched on Overview Bar chart click, cached thereafter.
 
-```bash
-# Summary only (no packet data) - smaller files
-python packets_data/generate_flow_list.py --input-dir packets_data/attack_flows_day1to5
+**Packet column format** (`fp`): `delta_ts:flags:dir,...` — delta microseconds from flow start, TCP flags bitmask, direction (1=ip1→ip2).
 
-# With embedded packet data (fp column) - enables "View Packets" button
-python packets_data/generate_flow_data.py --input-dir packets_data/attack_flows_day1to5
-```
+**When `fp` column present**: "View Packets" works without chunk files. Without `fp`: "View Packets" and "Export CSV" disabled.
 
-**Output Structure**:
-```
-indices/flow_list/
-├── index.json                      # IP pair index (87KB)
-├── 172-28-4-7__192-168-1-1.csv    # Flows for this IP pair
-├── 172-28-4-7__10-0-0-1.csv       # Another IP pair
-└── ...                             # 574 files total (~525MB)
-```
-
-**index.json Structure**:
-```json
-{
-  "version": "1.1",
-  "format": "flow_list_csv",
-  "columns": ["d", "st", "et", "p", "sp", "dp", "ct", "fp"],
-  "total_flows": 5482939,
-  "total_pairs": 574,
-  "unique_ips": 294,
-  "time_range": { "start": 1257254652674641, "end": 1257654102004202 },
-  "pairs": [
-    { "pair": "172.28.4.7<->192.168.1.1", "file": "172-28-4-7__192-168-1-1.csv", "count": 1523 }
-  ]
-}
-```
-
-**CSV Format** (with embedded packet data):
-```csv
-start_time,src_port,dst_port,close_type,packets
-1257254652674641,54321,80,invalid_ack,"0:2:1,159:18:0,578:16:1"
-```
-
-- `start_time`: Start time (absolute microseconds)
-- `close_type`: Close type (graceful/abortive/ongoing) or invalid reason (invalid_ack, rst_during_handshake, etc.)
-
-The `packets` column contains embedded packet data: `delta_ts:flags:dir,...`
-- `delta_ts`: Microseconds relative to flow start time
-- `flags`: TCP flags (numeric value)
-- `dir`: Direction (1 = ip1→ip2, 0 = ip2→ip1) based on alphabetical IP order from filename
-- Initiator = first packet's dir (dir=1 means ip1 initiated, dir=0 means ip2 initiated)
-- Packet count = number of comma-separated entries
-- Duration = last packet's delta_ts (end_time = start_time + last delta_ts)
-
-**Lazy Loading Behavior**:
-- On page load: Only `index.json` is fetched (~87KB)
-- On IP selection: No CSV files loaded yet; UI shows "Flow List Available"
-- On Overview Bar chart click: Only relevant IP pair CSVs are fetched for the clicked time range
-- Loaded CSVs are cached in memory for subsequent requests
-
-**Key Files**:
-- `src/data/flow-list-loader.js` - FlowListLoader class for parsing/caching CSVs with `fp` column support
-- `src/data/flow-loader.js` - Decision tree that defers loading when FlowListLoader available
-
-**When flow_list CSVs are present**:
-- Flow list popup works without loading chunk files
-- If `fp` column present: "View Packets" visualizes embedded packet data (no chunk files needed)
-- If `fp` column absent: "View Packets" and "Export CSV" buttons are disabled
-- Overview Bar chart still uses adaptive flow_bins for visualization
-- CSV format is ~45% smaller than JSON; all files under GitHub's 100MB limit
+Generate with: `python packets_data/generate_flow_data.py --input-dir packets_data/attack_flows_day1to5`
 
 ### Packet Data Multi-Resolution (v3.3)
-
-The `csv-resolution-manager.js` handles zoom-level dependent packet data loading with 7 resolution levels:
 
 | Resolution | Bin Size | Auto Threshold |
 |------------|----------|----------------|
@@ -349,369 +200,180 @@ The `csv-resolution-manager.js` handles zoom-level dependent packet data loading
 | 1ms | 1ms | > 100ms |
 | raw | individual packets | ≤ 100ms |
 
-Coarse resolutions (hours, minutes, seconds) use single-file `data.csv` files loaded at initialization. Fine resolutions (100ms, 10ms, 1ms, raw) use chunked files loaded on-demand with LRU caching.
-
 **Resolution Selection** (`getResolutionForVisibleRange()` in `tcp-analysis.js`):
-- **Auto mode**: Threshold-based — picks the coarsest level whose threshold the visible range exceeds
-- **Manual override**: Dropdown selects an explicit resolution level. The selected level is used directly. When the user zooms in past the next finer level's threshold, it auto-refines one step at a time (e.g., minutes → seconds → 100ms → ...). Never goes coarser than the selected level.
-- The dropdown labels use "+" suffix (e.g., "Minutes+") to indicate zoom-to-finer behavior
-- A **current resolution indicator** badge next to the dropdown shows the active resolution (blue = auto, orange = manual override)
-
-**Generating multi-resolution flow bins**:
-```bash
-# Generate all resolutions from existing v3 data
-python packets_data/generate_flow_bins_v3.py --input-dir packets_data/attack_flows_day1to5
-```
+- **Auto mode**: Picks coarsest level whose threshold the visible range exceeds
+- **Manual override**: Dropdown selects explicit level; zooming in auto-refines one step at a time, never goes coarser than selected
+- Dropdown labels use "+" suffix (e.g., "Minutes+"). Resolution badge: blue = auto, orange = manual
 
 ### Ground Truth Integration
 
-`src/groundTruth/groundTruth.js` loads attack event annotations from `GroundTruth_UTC_naive.csv`:
-- Parses event types, source/destination IPs, port ranges, time windows
-- Converts timestamps to microseconds for alignment with packet data
-- Filters events by selected IPs for contextual display
+`src/groundTruth/groundTruth.js` loads attack annotations from `GroundTruth_UTC_naive.csv`, converts timestamps to microseconds, filters by selected IPs.
 
 ### IP Pair Layout System
 
-The visualization uses a sophisticated layout system to prevent overlapping when multiple IP pairs share the same source IP row:
-
 **Per-IP Dynamic Row Heights** (`src/layout/ipPositioning.js`):
-- `computeIPPairCounts()` counts unique destination IPs per source IP
-- Base row height: `max(ROW_GAP, pairCount * (SUB_ROW_HEIGHT + SUB_ROW_GAP))` (i.e. `pairCount * 32px`)
-- When Separate Flags is on, heights are expanded post-binning by `computeFlagSeparationHeights()` / `computeSubRowLayout()` in `tcp-analysis.js` to fit actual circle stacking
-- `ipRowHeights` Map stored in state for rendering access
-- Cumulative positioning: each IP's y = previous IP's y + previous IP's row height
+- Base row height: `pairCount * 32px`
+- When Separate Flags on: expanded post-binning by `computeFlagSeparationHeights()` / `computeSubRowLayout()`
+- `ipRowHeights` Map in state; cumulative Y positioning
 
-**IP Pair Vertical Offsets** (`src/rendering/bars.js`, `src/rendering/circles.js`):
-- Pairs within a row are ordered by time of first packet (earliest first)
-- Each pair gets a sub-row offset: `pairIndex * (subRowHeight + SUB_ROW_GAP)`
-- First pair (index 0) aligns with the IP label baseline
-- Subsequent pairs grow downward within the row's allocated height
-- `makeIpPairKey(srcIp, dstIp)` creates canonical keys (alphabetically sorted)
+**IP Pair Vertical Offsets**: Pairs within a row ordered by first-packet time. Each pair offset: `pairIndex * (subRowHeight + SUB_ROW_GAP)`.
 
-**Sub-Row Target IP Labels** (`src/rendering/circles.js`):
-- When an IP row is expanded and has multiple sub-rows, each sub-row displays a small italic label showing the target (partner) IP address
-- Labels are rendered as `.sub-row-ip-label` text elements inside the circle layer, positioned just left of the leftmost circle in each sub-row (`x = firstCircle.cx - radius - 4px`)
-- Y position uses the stable sub-row center (from `ipPairOrderByRow`), unaffected by flag separation
-- Labels are only shown for multi-pair rows; single-pair IPs and collapsed rows are skipped
-- Target IP is extracted from the canonical pair key by comparing against the row's `src_ip`
-- Labels are cleared and re-created on every `renderCircles()` call (zoom, pan, filter changes)
-- Styled: 9px monospace, italic, `#888` fill, `pointer-events: none`
+**Sub-Row Target IP Labels** (`circles.js`): small italic `.sub-row-ip-label` text, shown only for multi-pair expanded rows. 9px monospace, `#888`, pointer-events: none.
 
-**Sub-Row Ghost Arcs** (`src/rendering/circles.js`, `src/rendering/svgSetup.js`):
-- Persistent ghost arcs show IP pair connections at the sub-row level
-- Rendered as low-opacity arcs connecting each IP pair's sub-row position
-- Toggled via a control in the Control Panel
-- `svgSetup.js` handles SVG layer setup and hover area sizing; hover hit areas are limited to the IP label width to prevent overlap with chart content
+**Row Hover Highlighting**: grey shades; highlights all bins belonging to hovered IP pair.
 
-**Row Hover Highlighting**:
-- Hovering an IP row uses grey shades (not blue/yellow)
-- Highlights all bins in the row that belong to the hovered IP pair, not just the first matching bin
-
-**IP Label Hover Styling** (consistent across all views):
-- Hovered IP: bold, black (`#000`)
-- Connected IPs: font-weight 500, black (`#000`)
-- Non-connected IPs: faded to opacity 0.25
-- Applied in `timearcs_layout.js`, `rows.js` (TCP Analysis), and `tcp-analysis.css`
-
-**Circle Hover Callbacks** (`circles.js`):
-- `onCircleHighlight(srcIp, dstIps)` — called on circle mouseover; highlights source/destination IP rows and labels
-- `onCircleClearHighlight()` — called on circle mouseout; clears all highlights
-- TCP Analysis wires these via `renderCirclesWithOptions()` to apply `.highlighted`, `.connected`, `.faded` CSS classes
-
-**Arc Path Connections** (`src/rendering/arcPath.js`):
-- `arcPathGenerator()` accepts optional `srcY` and `dstY` for offset positions
-- Hover handlers calculate both source and destination offsets using `calculateYPosWithOffset()`
-- Arcs connect circle-to-circle at their actual offset positions, not baselines
+**IP Label Hover Styling**: Hovered=bold+black; connected=weight 500+black; non-connected=opacity 0.25.
 
 **Row Collapse Behavior**:
-- All IP rows with multiple pairs start **collapsed by default** (`defaultCollapseApplied` flag)
-- `state.layout.collapsedIPs` Set tracks which IPs have their sub-rows merged
-- Click individual IP labels to expand/collapse; per-IP toggle buttons are SVG circles at a fixed left-aligned column (`toggleX = -168` in `svgSetup.js`)
-- **"Expand All"/"Collapse All"** is a sticky pill-shaped HTML button (`#expand-all-btn`) at the top of `#chart-container` with `position: sticky; top: 8px`. Visually distinct from per-IP circles (pill shape with text label, dynamic width: 96px/106px). Created in `createOrUpdateExpandAllBtn()` in `tcp-analysis.js`
-- Collapsed rows merge all pair bins at same (time, yPos, flagType) into single circles
+- Multi-pair rows start **collapsed by default** (`defaultCollapseApplied` flag)
+- `state.layout.collapsedIPs` Set tracks collapsed IPs
+- Per-IP SVG toggle circles at `toggleX = -168`; **"Expand All"/"Collapse All"** sticky pill button (`#expand-all-btn`) at top of `#chart-container`
+- Collapsed rows merge bins at same (time, yPos, flagType) into single circles
 
 **Key Data Structures**:
 ```javascript
 // ipPairOrderByRow: Map<yPos, { order: Map<ipPairKey, index>, count: number }>
 // ipRowHeights: Map<ip, heightInPixels>
-// ipPairCounts: Map<ip, numberOfUniquePairs>
-// collapsedIPs: Set<ip> - IPs whose sub-rows are collapsed
-// subRowHeights: Map<"ip|pairKey", number> - per-sub-row effective height (null when separateFlags off)
-// subRowOffsets: Map<"ip|pairKey", number> - per-sub-row cumulative Y offset from baseY (null when separateFlags off)
-// state.search.newlyAddedIPs: Set<ip> - IPs added by "Select IPs" action (gold-highlighted until cleared)
+// collapsedIPs: Set<ip>
+// subRowHeights: Map<"ip|pairKey", number>  (null when separateFlags off)
+// subRowOffsets: Map<"ip|pairKey", number>  (null when separateFlags off)
+// state.search.newlyAddedIPs: Set<ip>
 ```
 
 **IMPORTANT — `ipPairOrderByRow` must be updated in-place**:
-`renderIPRowLabels()` in `svgSetup.js` captures `ipPairOrderByRow` in mouseover closures. If you replace the Map with a new object (`state.layout.ipPairOrderByRow = newMap`), those closures become stale and lookups fail (causing full-row highlight instead of sub-row highlight). Always update in-place:
+`renderIPRowLabels()` in `svgSetup.js` captures `ipPairOrderByRow` in mouseover closures. Replacing the Map breaks those closures. Always update in-place:
 ```javascript
 const newOrder = computeIPPairOrderByRow(packets, ipPositions);
 state.layout.ipPairOrderByRow.clear();
 for (const [k, v] of newOrder) state.layout.ipPairOrderByRow.set(k, v);
 ```
-This pattern is used at 4 sites: resolution change, drag-reorder, collapse/expand, and flag separation adjustment.
+Used at 4 sites: resolution change, drag-reorder, collapse/expand, flag separation adjustment.
 
 ### Circle View Modes (TCP Analysis)
 
 **Separate Flags** (`#separateFlags` checkbox, `state.ui.separateFlags`):
-- Prevents overlapping circles of different flag types at the same time bin
-- Groups co-located circles by `(binCenter, yPosWithOffset)`, sorts by TCP lifecycle phase order (`FLAG_PHASE_ORDER`: SYN → SYN+ACK → ACK → PSH → FIN → RST → OTHER), then packs them sequentially (each circle touching its neighbors) so the total vertical span = sum of all diameters
-- **Adaptive per-sub-row heights** (post-binning pipeline):
-  1. `computeFlagSeparationHeights(binnedPackets, rScale)` in `tcp-analysis.js` — groups binned packets by `(src_ip, ipPairKey, timeKey)`, computes sum-of-diameters per group, keeps the max per sub-row → returns `Map<"ip|pairKey", maxHeight>`
-  2. `computeSubRowLayout(perSubRowHeight, ipPairOrderByRow, ...)` — converts per-sub-row heights into cumulative Y offsets with variable stride: `center[i] = center[i-1] + h[i-1]/2 + SUB_ROW_GAP + h[i]/2`. Also computes updated IP row heights (sum of all sub-row heights + gaps). Returns `{ subRowOffsets, subRowHeights, ipRowHeightUpdates }`
-  3. Results stored in `state.layout.subRowHeights` and `state.layout.subRowOffsets`; reset to `null` when Separate Flags is off. All stride calculations (rendering, hover detection, box selection) use offset lookups with fallback to uniform `pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP)`
-- For collapsed rows, the span is clamped to available row height and falls back to even spacing
-- Implemented in `src/rendering/circles.js:174-224` (circle packing), `tcp-analysis.js:409-507` (height computation)
-- Named "Separate Flags" in the UI (not "Stacked Circles" — avoid that term)
-- Default: off (`separateFlags: false` in `tcp-analysis.js:252`)
+- Groups co-located circles by `(binCenter, yPosWithOffset)`, sorts by `FLAG_PHASE_ORDER` (SYN→SYN+ACK→ACK→PSH→FIN→RST→OTHER), packs sequentially
+- Post-binning pipeline: `computeFlagSeparationHeights()` → `computeSubRowLayout()` → stores in `state.layout.subRowHeights/subRowOffsets`; reset to `null` when off
+- Implemented in `circles.js:174-224`, `tcp-analysis.js:409-507`
+- Named "Separate Flags" in UI. Default: off.
 
 ### Link Rendering (TCP Analysis Packet View)
 
-Three types of arc links connect circles in the Packet View:
+1. **Hover S-curves** (temporary, `circles.js`) — S-curve on mouseover showing flow direction + midpoint arrowhead; removed on mouseout. Collapsed circles (`ipPairKey === '__collapsed__'`) skip S-curve.
+2. **Sub-row arcs** (`#showSubRowArcs`, `state.ui.showSubRowArcs`) — persistent low-opacity arcs per IP pair sub-row
+3. **TCP Flow arcs** (`#showTcpFlows`, `state.ui.showTcpFlows`) — persistent arcs for selected flows, drawn by `drawSelectedFlowArcs()` in `tcp-analysis.js:1654-1758`
 
-1. **Hover S-curves** (temporary) — drawn on circle mouseover in `circles.js`. Replaces the old arc-to-destination with an S-curve that shows flow direction. The dummy node endpoint is synthesized by projecting forward from the hovered circle by one bin width (`d.bin_end - d.bin_start` converted to pixels, min 20px). The S-curve bends down to the destination IP's sub-row y-position then ends at the dummy node x. Includes a midpoint polygon arrowhead. Removed on mouseout.
-   - **Event handlers** (`handleMouseover`, `handleMousemove`, `handleMouseout`) are defined as named closures inside `renderCircles` and bound in **both** the `enter` and `update` join paths, so all circles (newly entered and persisted across zoom/pan) always use the current render's `xScale` and `calculateYPosWithOffset`.
-   - **Collapsed circles** (`ipPairKey === '__collapsed__'`) have ambiguous `dst_ip` and skip S-curve drawing; tooltip and IP highlight still fire normally.
+Event handlers (`handleMouseover/move/out`) are defined as named closures inside `renderCircles`, bound in **both** enter and update join paths so zoomed/panned circles always use current scales.
 
-2. **Sub-row arcs** (`#showSubRowArcs` toggle, `state.ui.showSubRowArcs`) — persistent low-opacity arcs connecting IP pair sub-rows. Drawn by `drawSubRowArcs()` in `tcp-analysis.js`. Toggled via Control Panel checkbox.
+**Circle Hover Callbacks**: `onCircleHighlight(srcIp, dstIps)` / `onCircleClearHighlight()` wire `.highlighted`, `.connected`, `.faded` CSS classes.
 
-3. **TCP Flow arcs** (`#showTcpFlows` toggle, `state.ui.showTcpFlows`) — persistent arcs for selected TCP flows, drawn by `drawSelectedFlowArcs()` in `tcp-analysis.js:1654-1758`. Grouped by time bucket, src/dst IP pair, and flag type. Phase filters (establishment/data transfer/closing) control which flows are shown.
-
-Note: Auto-enabling links at raw zoom level (as in the original requirements) is **not yet implemented**.
+**Arc Path Connections** (`arcPath.js`): `arcPathGenerator()` accepts optional `srcY`/`dstY`; hover handlers use `calculateYPosWithOffset()` for accurate sub-row positions.
 
 ### Force-Directed Layout
 
-- **TimeArcs** (`src/layout/timearcs_layout.js`): Complex multi-force simulation with component separation, hub attraction, y-constraints
-- **Force Network** (`src/layout/force_network.js`): 2D force layout used as the **default view mode** in TimeArcs. Aggregates arc data by IP pair + attack type, renders with D3 force simulation. Supports `precalculate()` for pre-computing positions (used during animated transitions) and `staticStart` rendering. On data load, the timearcs render completes first, then auto-transitions to force layout via `transitionToForceLayout()`
-- **BarDiagram**: Uses vertical IP order from TimeArcs directly (no separate force layout)
+- **TimeArcs** (`timearcs_layout.js`): Multi-force simulation with component separation, hub attraction, y-constraints
+- **Force Network** (`force_network.js`): Default view in TimeArcs. Supports `precalculate()` for pre-computing positions. On load: timearcs renders first, then auto-transitions via `transitionToForceLayout()`
 
-**Network Mode Toggle** (`attack-network.html`):
-- Radio buttons switch between "Timearcs Time Line View" (arc timeline) and "Force layout network view" (2D network graph)
-- Default: Force layout network view (`layoutMode = 'force_layout'`, `labelMode = 'force_layout'`)
-- Force layout uses `attack_group` for coloring; Timearcs uses `attack` (finer-grained)
+**Network Mode Toggle**: Radio buttons (Timearcs / Force layout). Default: force layout. Force uses `attack_group` for color; Timearcs uses `attack`.
 
 ### Brush Selection System (attack-network.js)
 
-Drag-to-brush selection allows users to select arcs/nodes for analysis and export to tcp-analysis:
-- **Persistent selections** (`persistentSelections[]`): Stored at module level as data objects with `{id, timeBounds, ips, arcs, timeRange}`. Survive resize/filter re-renders.
-- **`multiSelectionsGroup`**: SVG `<g>` holding selection visuals. Must be reset to `null` in `render()` cleanup (after `svg.selectAll('*').remove()`) so `setupDragToBrush()` creates a fresh DOM group. Forgetting this causes new selections to append to a detached element.
-- **`computeSelectionBounds()`**: Recomputes selection rectangle pixel bounds from stored IP names using current scales/node positions (not stale pixel values). Shared by `createPersistentSelectionVisual` and `updatePersistentSelectionVisuals`.
-- **`redrawAllPersistentSelections()` / `redrawPersistentSelectionsFn`**: Clears and re-creates all selection DOM elements. Called after positions finalize (timearcs animation end, force layout setup, component layout change) and from the force layout resize handler.
-- **Resize behavior**: Timearcs mode calls `render()` which preserves `persistentSelections` and redraws after animation. Force layout mode bypasses `render()` and calls `redrawPersistentSelectionsFn` directly.
+Drag-to-brush selection for arc/node export to tcp-analysis:
+- **`persistentSelections[]`**: Data objects `{id, timeBounds, ips, arcs, timeRange}`, survive resize
+- **`multiSelectionsGroup`**: Must be reset to `null` in `render()` cleanup (after `svg.selectAll('*').remove()`) — forgetting causes selections to append to a detached DOM element
+- **`computeSelectionBounds()`**: Recomputes pixel bounds from IP names using current scales (not stale pixels)
+- **`redrawAllPersistentSelections()`**: Called after positions finalize and from force layout resize handler
 
 ### Box Selection System (tcp-analysis.js)
 
-Box selection allows users to select packets on circle rows for raw CSV export:
-- **Enable**: `#enableBoxSelection` checkbox in Control Panel (`state.ui.enableBoxSelection`)
-- **Interaction**: When enabled, click-drag horizontally across any IP row (like text selection — no modifier key needed). Box height auto-snaps to the detected row. Normal pan/drag is disabled while box selection mode is on; wheel zoom still works.
-- **Collapsed mode**: Box covers entire IP row; paired boxes drawn on all partner IP rows via `allPairs`
-- **Expanded mode**: Box targets a specific sub-row; paired box drawn on partner IP's matching sub-row
-- **Multiple selections** supported; all use dark grey (`BOX_SELECTION_COLOR = '#555'`)
-- **Persistent selections** (`boxSelections[]`): Stored as data coordinates (time range + IP names), recomputed to pixels on zoom/resize via `redrawAllBoxSelections()`
-- **Export**: `exportBoxSelectionCSV()` (async) loads raw packets via `fetchChunksForRange(start, end, 'raw')` — fetches actual individual packets with microsecond timestamps, ports, and flags regardless of current zoom resolution. Falls back to `state.data.full` if raw resolution unavailable.
+Horizontal click-drag on IP rows to select packets for CSV export:
+- **Enable**: `#enableBoxSelection` (`state.ui.enableBoxSelection`). Disables pan; wheel zoom still works.
+- **Collapsed mode**: full IP row; **Expanded mode**: specific sub-row + partner sub-row
+- `boxSelections[]` stored as data coordinates, recomputed on zoom/resize via `redrawAllBoxSelections()`
+- Export: `exportBoxSelectionCSV()` fetches raw packets via `fetchChunksForRange(start, end, 'raw')`
 
-**SVG layering** (inside `mainGroup`, appended by `setupBoxSelectionDrag()`):
-1. Overlay rect (`.box-select-overlay`) — `pointer-events: all` when enabled, captures drag events
-2. Selections group (`.box-selections-group`) — `pointer-events: none` on `<g>` so rects pass through to overlay; `foreignObject` buttons override with `pointer-events: all` for clickability
+**SVG layering**: Overlay rect (`.box-select-overlay`, `pointer-events: all`) + selections group (`.box-selections-group`, `pointer-events: none`; `foreignObject` buttons override).
 
-**Zoom integration**:
-- `src/interaction/zoom.js`: Zoom filter blocks drag-pan when `isBoxSelectionActive()` returns true
-- `src/interaction/timearcsZoomHandler.js`: Calls `redrawAllBoxSelections()` after zoom render
-- Drag-reorder handler also calls `redrawAllBoxSelections()`
+**Key functions**: `setupBoxSelectionDrag()`, `detectIPRowFromY()`, `computeSubRowBounds()`, `finalizeBoxSelection()`, `createBoxSelectionVisual()`, `redrawAllBoxSelections()`, `exportBoxSelectionCSV()`
 
-**Key functions** (all in `tcp-analysis.js`):
-- `setupBoxSelectionDrag()` — creates overlay + selections group, wires drag handlers
-- `detectIPRowFromY(y)` — finds IP row/sub-row for a Y coordinate
-- `computeSubRowBounds(ip, pairKey)` — returns `{boxY, boxH}` for source or destination
-- `finalizeBoxSelection(start, end, rowInfo)` — converts pixel coords to selection data object
-- `createBoxSelectionVisual(selection)` — draws source rect, partner rects, label, Export/Remove buttons
-- `redrawAllBoxSelections()` — clears and recreates all visuals from stored data
-- `exportBoxSelectionCSV(selection)` — async; loads raw packets, filters by IP pair, downloads CSV
+### Pattern Search System
 
-### Pattern Search System (tcp-analysis.js, src/search/)
+**Architecture** (`src/search/`):
+- `pattern-language.js` — Tokenizer, parser, compiler, matcher for the DSL
+- `pattern-presets.js` — Built-in presets (see `memory/MEMORY.md` for current preset table and coverage analysis)
+- `pattern-search-engine.js` — Orchestrates search across `FlowListLoader` data
+- `flow-abstractor.js` — Converts packet arrays to abstract event sequences (3 levels)
+- `search-results.js` — Stores per-IP-pair match counts
+- `pattern-search-panel.js` — Search panel UI in Control Panel
+- `pattern-builder-popup.js` — Visual block-based pattern builder popup
 
-The Pattern Search feature allows searching for TCP packet patterns across flows using a custom DSL.
-
-**Architecture:**
-- `src/search/pattern-language.js` — Tokenizer, parser, compiler, and matcher for the DSL
-- `src/search/pattern-presets.js` — Built-in preset patterns (e.g., "Full Graceful Close", "SYN Flood")
-- `src/search/pattern-search-engine.js` — Orchestrates search across flow data from `FlowListLoader`
-- `src/search/flow-abstractor.js` — Converts embedded packet arrays to abstract event sequences for matching
-- `src/search/search-results.js` — Stores match results with per-IP-pair match counts
-- `src/ui/pattern-search-panel.js` — Search panel UI in the Control Panel
-- `src/ui/pattern-builder-popup.js` — Visual pattern builder popup (block-based)
-
-**DSL Grammar** (simplified):
+**DSL Grammar**:
 ```
-pattern   := sequence ('|' sequence)*      # disjunction (OR)
-sequence  := element ('->' element)*       # strict adjacency
-element   := '!'? atom quantifier?         # negation + quantifier
+pattern   := sequence ('|' sequence)*
+sequence  := element ('->' element)*
+element   := '!'? atom quantifier?
 atom      := event_name constraint? | '(' pattern ')' | '.' | '*' | '$' | '^'
 quantifier := '+' | '?' | '{' min (',' max?)? '}'
 constraint := '[' key op value (',' key op value)* ']'
 ```
 
-Key semantics:
-- `->` means **strict adjacency** — no events allowed between elements unless explicitly matched
-- `.` and `*` are both wildcard atoms (match any single event)
-- `ACK{0,}` = zero or more ACKs (greedy with backtracking)
-- `!SYN_ACK` = negative lookahead (does NOT consume an event)
-- `$` = end-of-sequence anchor (matches only at end; does NOT consume an event)
-- `^` = start-of-sequence anchor (matches only at position 0; does NOT consume an event)
-- Both `^` and `$` are zero-width assertions — they bypass the quantifier loop in `compileElement()` since repeating a position check is meaningless
-- Constraints: `[dir=out]`, `[dt>1s]`, `[dir=in,dt<50ms]`
+Key semantics: `->` = strict adjacency; `.`/`*` = wildcard; `!SYN_ACK` = negative lookahead (zero-width); `$` = end anchor (zero-width); `^` = start anchor (zero-width). Both anchors bypass the quantifier loop in `compileElement()`.
 
-**DSL Implementation Details** (`src/search/pattern-language.js`):
-- **Tokenizer**: Token types include `IDENT`, `ARROW`, `PIPE`, `LBRACE`, `RBRACE`, `DOT`, `STAR`, `BANG`, `DOLLAR`, `CARET`, `LBRACKET`, `RBRACKET`, `LPAREN`, `RPAREN`, `PLUS`, `QUESTION`, `COMMA`, `NUMBER`, `EOF`
-- **`^` (StartAnchor)**: Compiled to `(seq, start) => ({ matched: start === 0, endIndex: start })`. Zero-width — only succeeds at position 0. `matchPattern()` scanner still iterates all start positions, but `^` ensures only position 0 can match.
-- **`$` (EndAnchor)**: Compiled to `(seq, start) => ({ matched: start === seq.length, endIndex: start })`. Only succeeds at end of sequence.
-- **`compileElement()` bypass**: Both `StartAnchor` and `EndAnchor` skip the quantifier loop — `if (atom.type === 'EndAnchor' || atom.type === 'StartAnchor') return atomMatcher;`
+**Abstraction Levels**: Level 1 (per-packet: flagType/dir/deltaTime), Level 2 (TCP phase groups), Level 3 (single outcome per flow).
 
-**Abstraction Levels:**
-- Level 1 (Packet): Each packet → `{ flagType, dir, deltaTime }`. Matches against individual packets.
-- Level 2 (Phase): Groups consecutive packets by TCP phase → `{ phase, packetCount, duration }`.
-- Level 3 (Outcome): Single event per flow → `{ outcome }` (e.g., `COMPLETE_GRACEFUL`).
+**Flag → DSL**: `classifyFlags()` in `flags.js` → display name → `FLAG_TO_DSL` map. Key: `RST` (0x04) and `RST_ACK` (0x14) are **distinct** tokens — patterns must use `(RST | RST_ACK)` to match both.
 
-**Flag Classification Pipeline** (Level 1):
-1. `flow-list-loader.js` parses `packets` column → `{ flags: number (bitmask), _fromInitiator: boolean, timestamp }`
-2. `flow-abstractor.js:abstractToLevel1()` calls `classifyFlags(flags)` → display name (e.g., `'RST+ACK'`)
-3. `FLAG_TO_DSL` map converts to DSL token name (e.g., `'RST+ACK'` → `'RST_ACK'`)
-4. Key bitmask → DSL mappings: `0x02` → `SYN`, `0x12` → `SYN_ACK`, `0x10` → `ACK`, `0x18` → `PSH_ACK`, `0x04` → `RST`, `0x14` → `RST_ACK`, `0x11` → `FIN_ACK`, `0x19` → `ACK_FIN_PSH`
+**Match behavior**: scans all start positions, reports first match per flow only.
 
-**Match behavior** (`matchPattern()` in `pattern-language.js:584-618`):
-- Scans all starting positions in the abstracted sequence
-- Reports **first match only** per flow (`break` at line 603)
-- Match region `{start, end}` points to positions in the abstracted sequence
+**"Select IPs" behavior**: additive only; newly added IPs in `state.search.newlyAddedIPs`, shown gold (`#f1c40f`). Persist until `clearPatternSearch()`, new search, or manual checkbox change.
 
-**"Select IPs" behavior** (`selectMatchedIPsInSidebar()` in `tcp-analysis.js`):
-- **Additive only**: checks matched IPs that aren't already checked; never unchecks existing IPs
-- Tracks newly added IPs in `state.search.newlyAddedIPs` (Set)
-- Newly added IP labels get `.newly-added` CSS class (gold `#f1c40f`, bold) — applied via `applySearchHighlightClasses()`
-- Newly added multi-pair IPs are auto-collapsed (added to `state.layout.collapsedIPs`)
-- Golden highlights persist until: `clearPatternSearch()`, new search started, or manual IP checkbox change
+**Important**: `.node-label` elements live in `svg` (not `mainGroup`). Use `d3.select(svg.node()).selectAll('.node-label')`.
 
-**Important — `.node-label` elements live in `svg`, not `mainGroup`:**
-IP labels (`.node-label`) are appended by `svgSetup.js` as children of `.node` groups directly under the `<svg>` element. The `mainGroup` is a separate clipped `<g>` for chart marks. When selecting `.node-label` elements, use `d3.select(svg.node()).selectAll('.node-label')` or traverse up via `mainGroup.node().closest('svg')`.
+**Pattern Builder Popup**: block-based drag-and-drop; flag palette + symbols row (`^`, `$`, `·` wildcard, `( | )` group creator). Group creator builds `(A | B)` alternation groups with 2–4 alternatives. `blocks-to-dsl.js` serializes; `pattern-ast-to-blocks.js` converts AST → blocks for preset loading.
 
-**Pattern Builder Popup** (`src/ui/pattern-builder-popup.js`, `pattern-builder-popup.css`):
-- Visual block-based pattern builder with drag-and-drop colored pills
-- **Flag palette** — colored buttons for each TCP flag type (SYN, SYN+ACK, ACK, PSH+ACK, ACK+FIN+PSH, FIN+ACK, RST, RST+ACK)
-- **Symbols row** (`.pb-symbols`) — separate row below the flag palette with:
-  - `^` button — adds start anchor block
-  - `$` button — adds end anchor block
-  - `·` (wildcard) — adds a `.` wildcard block (moved here from flag palette)
-  - `( | )` button — opens the group creator dialog
-- **Group creator** (`_openGroupCreator()`) — modal dialog for building `(A | B)` alternation groups:
-  - 2-4 alternative rows, each with a mini flag palette and removable pills
-  - "Add Alternative" button (if < 4 rows), "Create" and "Cancel" buttons
-  - Produces a `GROUP` block with `alternatives: PatternBlock[][]`
-- **Block-to-DSL conversion** (`src/search/blocks-to-dsl.js`): Serializes PatternBlock[] to DSL string. Anchors (`^`, `$`) emit raw characters. Groups emit `(alt1 | alt2)` syntax.
-- **AST-to-block conversion** (`src/search/pattern-ast-to-blocks.js`): Converts parsed AST back to visual blocks for preset loading. Handles `StartAnchor`, `EndAnchor`, `Group`, `Wildcard`, negation, quantifiers, and constraints.
-
-**Current Level 1 Presets** (`src/search/pattern-presets.js`):
-
-| Preset | Pattern | Notes |
-|--------|---------|-------|
-| Full Graceful Close | `SYN -> SYN_ACK -> ACK -> .{1,} -> (FIN_ACK \| ACK_FIN_PSH) -> ACK{1,} -> $` | Complete TCP lifecycle. 99+% match rate for graceful flows. |
-| Full Abortive Connection | `SYN -> SYN_ACK -> ACK -> .{1,} -> (RST \| RST_ACK) -> $` | Handshake + data + RST. Matches both RST (0x04) and RST_ACK (0x14). |
-| SYN Retransmit (no SYN+ACK) | `SYN -> SYN` | Consecutive SYNs without server response. |
-| RST During Handshake | `SYN -> SYN_ACK -> RST` | RST after SYN_ACK but before ACK. |
-| SYN Rejected (RST+ACK) | `SYN -> RST_ACK` | Server immediately rejects with RST+ACK. |
-| SYN+ACK Retransmit | `SYN_ACK -> SYN_ACK` | Repeated SYN_ACK (server retry). |
-| SYN Flood (5+ SYNs) | `SYN{5,}` | 5 or more consecutive SYN packets. |
-| RST Flood (3+ consecutive) | `RST{3,}` | 3 or more consecutive RST packets. |
-
-**Full Graceful Close pattern details:**
-The `.{1,}` wildcard bridges the variable-length data phase; greedy backtracking finds the last FIN-bearing packet before the final ACKs. The `(FIN_ACK | ACK_FIN_PSH)` disjunction covers both standard FIN (95.1%) and piggybacked FIN-on-data (4.9%). `ACK{1,}` handles one or more trailing acknowledgments. The `$` end anchor ensures the graceful close is the **last** thing in the flow — without it, abortive flows containing a mid-flow FIN_ACK→ACK before a trailing RST would false-positive.
-
-**Full Abortive Connection pattern details:**
-Uses `(RST | RST_ACK)` because `classifyFlags()` in `flags.js` maps `0x04` → `RST` and `0x14` → `RST_ACK` as distinct DSL tokens, while the Python flow detector (`tcp_data_loader_streaming_by_ip_pair.py`) treats both as `closeType = 'abortive'`. Without the disjunction, flows ending with RST+ACK would be missed.
-
-### Overview Chart vs Pattern Search Count Mismatch
-
-**Level 1 pattern search results will NOT match overview chart legend counts exactly.** This is a systemic architectural difference, not a bug.
-
-**Root cause — two different classification systems:**
-
-1. **Overview chart** uses pre-aggregated flow bins (`flow_bins_*.json`) generated by `generate_flow_bins_v3.py`, which reads `closeType` and `invalidReason` from the Python flow detector's **state-based** classification. The Python detector (`tcp_data_loader_streaming_by_ip_pair.py:322-330`) classifies by TCP state machine:
-   - Any RST after handshake → `closeType = 'abortive'` (regardless of exact flag combo)
-   - Any RST during establishing → `invalidReason = 'rst_during_handshake'` (regardless of packet order)
-
-2. **Pattern search** uses Level 1 DSL matching against the actual packet sequence from flow_list CSVs via `flow-abstractor.js`. It requires **exact packet-level adjacency** — `SYN -> SYN_ACK -> RST` means precisely those three flags in that order with nothing between them.
-
-**Specific mismatches verified by diagnostic scripts (`scripts/diagnose_*.js`):**
-
-| Overview Category | Overview Count (all IPs) | Pattern Match | Gap | Main Causes |
-|---|---|---|---|---|
-| `abortive` | 29,788 | 29,618 | 170 | Reversed handshake (SYN_ACK before SYN): 145; RST not last: 5; missing SYN: 6 |
-| `rst_during_handshake` | 451,671 | 405,309 | 46,362 | `SYN -> RST_ACK` (45,007) counted as rst_during_hs by Python but matched by separate "SYN Rejected" preset |
-
-**Key flag classification detail** (`src/tcp/flags.js:classifyFlags()`):
-- `RST` (flags `0x04`) and `RST+ACK` (flags `0x14`) are **distinct** DSL tokens (`RST` vs `RST_ACK`)
-- The Python detector does not distinguish them — both trigger the same state transition
-- Patterns must use `(RST | RST_ACK)` to match both variants
-
-**Common packet sequence anomalies that cause mismatches:**
-- **Reversed handshake** — `SYN_ACK -> SYN -> ACK` instead of `SYN -> SYN_ACK -> ACK` (capture timing/reordering). ~85% of abortive mismatches.
-- **SYN retransmits** — `SYN -> SYN_ACK -> SYN -> SYN_ACK -> ACK` (duplicate handshake packets break strict adjacency)
-- **RST not terminal** — `... -> RST -> FIN_ACK` (trailing packet after RST breaks `$` anchor)
-- **Broader Python categories** — `rst_during_handshake` includes both `SYN -> SYN_ACK -> RST` and `SYN -> RST_ACK`; these are separate presets in Level 1
-
-**Implication for future work:**
-- Level 3 (Outcome) presets would match overview counts 1:1 since they use the same `closeType`/`invalidReason` fields via `flowToOutcome()` in `flags.js`
-- Level 1 presets are for precise packet-sequence analysis, not for reproducing overview totals
-- To match overview exactly at Level 1, composite patterns would be needed: e.g., `(SYN -> SYN_ACK -> RST) | (SYN -> RST_ACK) | (SYN -> RST) | (SYN_ACK -> SYN -> RST)`
+**Count mismatch**: Level 1 pattern counts ≠ overview chart counts by design (different classification systems — packet-level adjacency vs Python state machine). See `memory/MEMORY.md` for details.
 
 ### Shared Highlight Logic
 
-`src/rendering/highlightUtils.js` provides shared hover highlight functions used by both timearcs (`arcInteractions.js`) and force layout (`force_network.js`):
-- `highlightHoveredLink()` / `unhighlightLinks()` — dim all links, highlight hovered
-- `getLinkHighlightInfo()` — compute active IPs and attack color from link datum (handles both timearcs arc shape and force link shape)
-- `highlightEndpointLabels()` / `unhighlightEndpointLabels()` — bold, enlarge, color active IP labels; dim others
-- `ipFromDatum()` (internal) — normalizes datum to IP string (timearcs labels bind raw strings, force layout nodes bind `{id, degree}` objects)
-- `showArcArrowhead(container, pathElement, datum, color)` — renders a filled polygon arrowhead on a hovered timearcs arc, positioned at the arc midpoint
-- `showLineArrowhead(container, datum, color, targetRadius, strokeWidth)` — renders a directional arrowhead on a hovered force-layout link; returns base position so the line can be trimmed to not overlap the arrow
-- `removeArrowheads(container)` — cleans up arrowhead overlays on mouseout
-
-**Directional arrows** appear on mouseover only (not permanently, to avoid clutter). Both timearcs arcs (`arcInteractions.js:74-75`) and force layout links (`force_network.js:438-454`) call these. In the TCP Analysis Packet View, `circles.js` draws a midpoint polygon arrowhead on the hover S-curve (no SVG `<marker>` — arrowhead is computed from the Bezier tangent angle at the curve midpoint).
+`src/rendering/highlightUtils.js`:
+- `highlightHoveredLink()` / `unhighlightLinks()` — dim/highlight links
+- `getLinkHighlightInfo()` — active IPs + attack color from datum (handles both arc and force-link shapes)
+- `highlightEndpointLabels()` / `unhighlightEndpointLabels()` — bold/dim IP labels
+- `showArcArrowhead()` / `showLineArrowhead()` / `removeArrowheads()` — mouseover-only directional arrowheads
 
 ### Control Panel
 
-The Control Panel (`control-panel.js`) is a `position: fixed` aside with drag-to-move and click-to-collapse behavior:
-- **Drag handle**: Title bar at top — click to collapse/expand, drag to reposition
-- **Zoom controls bar**: Positioned above the Control Panel via `position: absolute; bottom: 100%`. Contains resolution dropdown, current resolution indicator badge, and zoom +/- buttons. Stays visible when panel is collapsed. Moves with the panel on drag.
-- **Controls body**: Scrollable area with IP selection, TCP flags, legends, flow visualization options
-- Panel uses `overflow: visible` so the zoom bar (absolutely positioned above) is not clipped
+`control-panel.js`: `position: fixed` aside, drag-to-move, click title bar to collapse.
+- **Zoom controls bar**: `position: absolute; bottom: 100%` — stays visible when collapsed, moves with panel
+- Uses `overflow: visible` so zoom bar isn't clipped
 
 ### Fisheye Distortion
 
-The fisheye lens effect (`src/plugins/d3-fisheye.js`, wrapped by `src/scales/distortion.js`) provides overview+detail zooming. Controlled by the "Lensing" toggle and zoom slider in the UI.
+`src/plugins/d3-fisheye.js` wrapped by `src/scales/distortion.js`. Controlled by "Lensing" toggle and zoom slider.
 
 ### Performance Optimizations
 
-- **Binning**: Reduces millions of packets to thousands of bins
-- **Web Worker**: Packet filtering runs off main thread
-- **Layer caching**: Full-domain layer pre-rendered
-- **Batch processing**: Flow reconstruction and list rendering use configurable batch sizes
-- **LRU Cache**: `resolution-manager.js` caches loaded detail chunks with automatic eviction
-- **Multi-resolution loading**: Zoom-level dependent data loading (overview → detail)
-- **IP-pair organization** (v3): Chunks organized by IP pair enable efficient filtering—only load chunks for selected IP pairs instead of scanning all chunks
-- **Adaptive overview resolution**: Coarse bins for full view, fine bins when zoomed (Overview Bar chart)
-- **Lazy flow list loading**: CSV files only loaded when user clicks Overview Bar chart bars
+- Binning (millions of packets → thousands of bins)
+- Web Worker for off-main-thread packet filtering
+- LRU cache for detail chunk loading (`resolution-manager.js`)
+- Multi-resolution loading (coarse overview → fine detail)
+- IP-pair organization (v3): load only selected pair chunks
+- Lazy flow list loading: CSVs fetched only on Overview Bar chart click
 
 ## Module Dependencies
 
-Main files import heavily from `/src`:
+Main files import from `/src`:
 - **Rendering**: `bars.js`, `circles.js`, `arcPath.js`, `rows.js`, `tooltip.js`, `arcInteractions.js`, `highlightUtils.js`, `svgSetup.js`
-- **Data**: `binning.js` (visible packets, bar width), `flowReconstruction.js`, `csvParser.js`, `aggregation.js`, `resolution-manager.js`, `csv-resolution-manager.js`, `data-source.js`, `component-loader.js`, `initialRender.js`
+- **Data**: `binning.js`, `flowReconstruction.js`, `csvParser.js`, `aggregation.js`, `resolution-manager.js`, `csv-resolution-manager.js`, `data-source.js`, `component-loader.js`, `initialRender.js`
 - **Layout**: `forceSimulation.js`, `force_network.js`, `timearcs_layout.js`
 - **Interaction**: `zoom.js`, `arcInteractions.js`, `dragReorder.js`, `resize.js`
 - **Scales**: `scaleFactory.js`, `distortion.js`, `bifocal.js`
 - **Ground Truth**: `groundTruth.js`
-- **Utils**: `formatters.js` (byte/timestamp formatting), `helpers.js`
+- **Utils**: `formatters.js`, `helpers.js`
 - **UI**: `legend.js`, `bifocal-handles.js`, `loading-indicator.js`, `pattern-search-panel.js`, `pattern-builder-popup.js`
-- **Search**: `pattern-language.js` (DSL), `pattern-search-engine.js`, `pattern-presets.js`, `flow-abstractor.js`, `search-results.js`
-- **Config**: `constants.js` (colors, sizes, debug flags)
+- **Search**: `pattern-language.js`, `pattern-search-engine.js`, `pattern-presets.js`, `flow-abstractor.js`, `search-results.js`
+- **Config**: `constants.js`
 
 ## Original TimeArcs Source
 
-The `timearcs_source/` directory contains the original TimeArcs implementation for political blog analysis (unrelated to the network traffic visualization).
+The `timearcs_source/` directory contains the original TimeArcs implementation for political blog analysis (unrelated to this project).
