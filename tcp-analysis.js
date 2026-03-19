@@ -64,6 +64,13 @@ import {
     computeIPPairCounts
 } from './src/layout/ipPositioning.js';
 import {
+    computeActiveIPs as computeActiveIPsFilter,
+    computeCompactPositions,
+    applyFilteredPositions,
+    restoreBasePositionsToState,
+    animateIPRows as animateIPRowsFilter
+} from './src/layout/ipRowFilter.js';
+import {
     createSVGStructure,
     createBottomOverlay,
     renderIPRowLabels,
@@ -274,7 +281,12 @@ const state = {
         ipPairCounts: new Map(),  // Count of unique destination IPs per source IP
         ipRowHeights: new Map(),  // Per-IP row heights based on pair count
         ipConnectivity: new Map(), // Map<ip, Set<connectedIps>> for row highlighting
-        collapsedIPs: new Set()   // Set of IPs whose sub-rows are collapsed into one
+        collapsedIPs: new Set(),  // Set of IPs whose sub-rows are collapsed into one
+        // IP row filter snapshots (saved after each full layout computation)
+        basePositions: new Map(),      // Snapshot of ipPositions (unfiltered)
+        baseRowHeights: new Map(),     // Snapshot of ipRowHeights (unfiltered)
+        basePairOrderByRow: new Map(), // Snapshot of ipPairOrderByRow (unfiltered)
+        activeIPs: null                // Set<ip> with connections in visible window, or null (= all)
     },
 
     // Phase 5: Flows (medium coupling, ~60 refs)
@@ -310,6 +322,24 @@ const state = {
 function makeIpPairKey(srcIp, dstIp) {
     if (!srcIp || !dstIp) return 'unknown';
     return srcIp < dstIp ? `${srcIp}<->${dstIp}` : `${dstIp}<->${srcIp}`;
+}
+
+/**
+ * Save a snapshot of the current IP positioning into the layout state's
+ * base* fields.  Call this after every full layout computation so the
+ * zoom-based row filter always has a valid reference to restore from.
+ *
+ * @param {object} state - Global app state.
+ */
+function saveBasePositions(state) {
+    state.layout.basePositions = new Map(state.layout.ipPositions);
+    state.layout.baseRowHeights = new Map(state.layout.ipRowHeights);
+    // Deep-copy ipPairOrderByRow (values contain their own Map).
+    const copy = new Map();
+    for (const [yPos, { order, count }] of state.layout.ipPairOrderByRow) {
+        copy.set(yPos, { order: new Map(order), count });
+    }
+    state.layout.basePairOrderByRow = copy;
 }
 
 /**
@@ -565,11 +595,15 @@ function createOrUpdateExpandAllBtn(marginTop) {
                     }
                 }
             }
+            const savedDomain = xScale ? xScale.domain().slice() : null;
             isHardResetInProgress = true;
             visualizeTimeArcs(state.data.filtered);
             updateTcpFlowPacketsGlobal();
             drawSelectedFlowArcs();
             applyInvalidReasonFilter();
+            if (savedDomain && xScale && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                applyZoomDomain(savedDomain, 'program');
+            }
         });
     }
 
@@ -945,12 +979,16 @@ function initializeBarVisualization() {
         },
         onToggleSeparateFlags: (checked) => {
             state.ui.separateFlags = checked;
+            const savedDomain = xScale ? xScale.domain().slice() : null;
             isHardResetInProgress = true;
             try {
                 visualizeTimeArcs(state.data.filtered);
                 updateTcpFlowPacketsGlobal();
                 drawSelectedFlowArcs();
                 applyInvalidReasonFilter();
+                if (savedDomain && xScale && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                    applyZoomDomain(savedDomain, 'program');
+                }
             } catch(e) { logCatchError('toggleSeparateFlags', e); }
         },
         onToggleFlowThreading: (checked) => {
@@ -964,23 +1002,29 @@ function initializeBarVisualization() {
             }
         },
         onToggleBinning: (checked) => {
-            state.ui.useBinning = checked; 
-            isHardResetInProgress = true; 
-            
+            state.ui.useBinning = checked;
+            const savedDomain = xScale ? xScale.domain().slice() : null;
+            isHardResetInProgress = true;
+
             // Force immediate re-render of the visualization
             try {
                 // Re-render the main visualization with current filtered data
                 visualizeTimeArcs(state.data.filtered);
-                
+
                 // Update TCP flow packets and arcs
                 updateTcpFlowPacketsGlobal();
-                
+
                 // Redraw selected flow arcs with new binning
                 drawSelectedFlowArcs();
-                
+
                 // Apply any active filters
                 applyInvalidReasonFilter();
-                
+
+                // Restore zoom position after rebuild
+                if (savedDomain && xScale && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                    applyZoomDomain(savedDomain, 'program');
+                }
+
                 // Update legends to reflect new scaling
                 setTimeout(() => {
                     try {
@@ -995,8 +1039,6 @@ function initializeBarVisualization() {
                 }, 50);
             } catch (e) {
                 console.warn('Error updating visualization after binning toggle:', e);
-                // Fallback to original behavior
-                applyZoomDomain(xScale.domain(), 'program');
             }
         }
     });
@@ -2569,6 +2611,8 @@ function getIPFilterController() {
             updateFlagStats,
             updateIPStats,
             applyTimearcsTimeRangeZoom,
+            getXScaleDomain: () => xScale ? xScale.domain().slice() : null,
+            applyZoomDomain,
             updateTcpFlowStats,
             refreshAdaptiveOverview,
             calculateGroundTruthStats,
@@ -4680,6 +4724,10 @@ function visualizeTimeArcs(packets) {
 
     // Apply positioning to state
     applyIPPositioningToState(state, positioning);
+    // Save base snapshots immediately so the zoom-based row filter can
+    // always restore the full unfiltered layout.
+    saveBasePositions(state);
+    state.layout.activeIPs = null; // Reset: all rows visible on a new full layout.
     const { yDomain, yRange, minY, maxY } = positioning;
     height = positioning.height;
 
@@ -4762,11 +4810,15 @@ function visualizeTimeArcs(packets) {
                 } else {
                     state.layout.collapsedIPs.add(ip);
                 }
+                const savedDomain = xScale ? xScale.domain().slice() : null;
                 isHardResetInProgress = true;
                 visualizeTimeArcs(state.data.filtered);
                 updateTcpFlowPacketsGlobal();
                 drawSelectedFlowArcs();
                 applyInvalidReasonFilter();
+                if (savedDomain && xScale && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                    applyZoomDomain(savedDomain, 'program');
+                }
             }
         });
     } catch (e) { LOG('Failed to build IP labels', e); }
@@ -4787,6 +4839,67 @@ function visualizeTimeArcs(packets) {
         yScaleDomain: yDomain,
         yScaleRange: yRange
     });
+
+    // 13.5 IP Row Filter helpers (closures that capture this render's SVG / svgContainer).
+    //
+    // applyIPRowFilter   — called on every debounced zoom-in: hides rows that have no
+    //                      connections in the visible time window and centres the rest.
+    // restoreBaseRows    — called when zooming back to the full time extent: slides all
+    //                      rows back to their original positions.
+    //
+    const applyIPRowFilter = (visiblePackets) => {
+        try {
+            if (!state.layout.basePositions || !state.layout.basePositions.size) return;
+            const activeIPs = computeActiveIPsFilter(visiblePackets);
+            if (activeIPs.size === 0) return; // Don't hide everything for an empty region.
+
+            const chartContainer = d3.select('#chart-container').node();
+            const containerH = chartContainer ? chartContainer.clientHeight : 600;
+            const usableH = Math.max(100, containerH - margin.top - margin.bottom);
+
+            const compact = computeCompactPositions({
+                activeIPs,
+                ipOrder: state.layout.ipOrder,
+                baseRowHeights: state.layout.baseRowHeights,
+                containerHeight: usableH,
+                topPad: TOP_PAD
+            });
+
+            applyFilteredPositions(state, compact);
+            state.layout.activeIPs = activeIPs;
+
+            animateIPRowsFilter(svg, d3, activeIPs, compact.positions, compact.rowHeights, ROW_GAP);
+
+            // Shrink SVG to match the compact layout (no extra scroll space).
+            const newH = Math.max(usableH, compact.totalHeight + compact.centerOffset);
+            svgContainer.attr('height', newH + margin.top + margin.bottom);
+            svg.select('#clip rect').attr('height', newH + 80);
+
+        } catch(e) { logCatchError('applyIPRowFilter', e); }
+    };
+
+    const restoreBaseRows = () => {
+        try {
+            if (!state.layout.basePositions || !state.layout.basePositions.size) return;
+
+            restoreBasePositionsToState(state);
+            state.layout.activeIPs = null;
+
+            // Animate every row back to its original position with full opacity.
+            const allIPs = new Set(state.layout.ipOrder);
+            animateIPRowsFilter(svg, d3, allIPs, state.layout.ipPositions, state.layout.ipRowHeights, ROW_GAP);
+
+            // Restore SVG height from the saved base positions.
+            const lastIp = state.layout.ipOrder[state.layout.ipOrder.length - 1];
+            if (lastIp) {
+                const maxY = state.layout.basePositions.get(lastIp) || 0;
+                const lastH = state.layout.baseRowHeights.get(lastIp) || ROW_GAP;
+                const restoreH = Math.max(500, maxY + lastH + 40 + TOP_PAD);
+                svgContainer.attr('height', restoreH + margin.top + margin.bottom);
+                svg.select('#clip rect').attr('height', restoreH + 80);
+            }
+        } catch(e) { logCatchError('restoreBaseRows', e); }
+    };
 
     // 14. Create zoom handler using extracted module (will be updated during zoom)
     const xAxis = d3.axisBottom(xScale).tickFormat(createZoomAdaptiveTickFormatter(() => xScale));
@@ -4830,7 +4943,9 @@ function visualizeTimeArcs(packets) {
         setCurrentResolutionLevel: (level) => { currentResolutionLevel = level; },
         drawAutoFlowThreading,
         clearAutoFlowThreading,
-        logCatchError
+        logCatchError,
+        applyIPRowFilter: (visiblePackets) => applyIPRowFilter(visiblePackets),
+        restoreBaseRows: () => restoreBaseRows()
     });
 
     // 15. Initialize zoom behavior
@@ -4855,6 +4970,8 @@ function visualizeTimeArcs(packets) {
         ipRowHeights: state.layout.ipRowHeights,
         onReorder: () => {
             try { const newOrderDrag = computeIPPairOrderByRow(state.data.filtered, state.layout.ipPositions); state.layout.ipPairOrderByRow.clear(); for (const [k, v] of newOrderDrag) state.layout.ipPairOrderByRow.set(k, v); applyCollapseOverrides(state.layout.ipPairOrderByRow); } catch(e) { logCatchError('recomputeIpPairOrder', e); }
+            // Save new base positions so subsequent zoom-filter uses the reordered layout.
+            try { saveBasePositions(state); } catch(e) { logCatchError('saveBasePositions-drag', e); }
             try {
                 // Sync row highlights with new positions
                 svg.selectAll('.row-highlight')

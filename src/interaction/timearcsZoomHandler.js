@@ -122,7 +122,9 @@ export function createTimeArcsZoomHandler(context) {
         setCurrentResolutionLevel,
         drawAutoFlowThreading,
         clearAutoFlowThreading,
-        logCatchError
+        logCatchError,
+        applyIPRowFilter,
+        restoreBaseRows
     } = context;
 
     return function zoomed({ transform, sourceEvent }) {
@@ -302,6 +304,20 @@ export function createTimeArcsZoomHandler(context) {
                 Math.floor(xScale.domain()[0]) <= Math.floor(timeExtent[0]) &&
                 Math.floor(xScale.domain()[1]) >= Math.floor(timeExtent[1])
             );
+
+            // === IP Row Filtering ===
+            // At full zoom-out: restore all rows to their base positions.
+            // Zoomed in: show only rows with connections in the visible window.
+            if (applyIPRowFilter && restoreBaseRows) {
+                try {
+                    if (atFullDomain && !flowsFilteringActive) {
+                        restoreBaseRows();
+                    } else if (!atFullDomain) {
+                        const quickVisible = getVisiblePackets(state.data.filtered, xScale);
+                        if (quickVisible.length > 0) applyIPRowFilter(quickVisible);
+                    }
+                } catch(e) { logCatchError('ipRowFilter', e); }
+            }
 
             const currentCache = getFullDomainBinsCache();
 

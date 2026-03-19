@@ -41,6 +41,8 @@ export function createIPFilterController(dependencies) {
         updateFlagStats,
         updateIPStats,
         applyTimearcsTimeRangeZoom,
+        getXScaleDomain,
+        applyZoomDomain,
         updateTcpFlowStats,
         refreshAdaptiveOverview,
         calculateGroundTruthStats,
@@ -166,6 +168,8 @@ export function createIPFilterController(dependencies) {
                 isPreBinned: state.data.isPreBinned
             });
 
+            const savedDomain = getXScaleDomain ? getXScaleDomain() : null;
+
             if (isFlowModeOnly) {
                 // Flow mode: overview chart handles visualization
                 console.log('[Visualization] Skipping packet visualization - in flow mode with no packet data');
@@ -181,7 +185,11 @@ export function createIPFilterController(dependencies) {
                 }
 
                 setTimeout(() => {
-                    applyTimearcsTimeRangeZoom();
+                    if (state.timearcs.timeRange) {
+                        applyTimearcsTimeRangeZoom();
+                    } else if (savedDomain && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                        applyZoomDomain(savedDomain, 'program');
+                    }
                 }, 150);
             } else {
                 // Use TimeArcs vertical order directly
@@ -192,7 +200,11 @@ export function createIPFilterController(dependencies) {
                 // Stats are updated inside visualizeTimeArcs with time range filtering
 
                 setTimeout(() => {
-                    applyTimearcsTimeRangeZoom();
+                    if (state.timearcs.timeRange) {
+                        applyTimearcsTimeRangeZoom();
+                    } else if (savedDomain && (savedDomain[0] !== state.data.timeExtent[0] || savedDomain[1] !== state.data.timeExtent[1])) {
+                        applyZoomDomain(savedDomain, 'program');
+                    }
                 }, 150);
             }
         } finally {
