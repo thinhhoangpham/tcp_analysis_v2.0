@@ -4725,9 +4725,6 @@ function visualizeTimeArcs(packets) {
 
     // Apply positioning to state
     applyIPPositioningToState(state, positioning);
-    // Save base snapshots immediately so the zoom-based row filter can
-    // always restore the full unfiltered layout.
-    saveBasePositions(state);
     state.layout.activeIPs = null; // Reset: all rows visible on a new full layout.
     const { yDomain, yRange, minY, maxY } = positioning;
     height = positioning.height;
@@ -4868,7 +4865,6 @@ function visualizeTimeArcs(packets) {
                 containerHeight: usableH,
                 topPad: TOP_PAD
             });
-
             applyFilteredPositions(state, compact);
             state.layout.activeIPs = activeIPs;
 
@@ -4889,19 +4885,32 @@ function visualizeTimeArcs(packets) {
             restoreBasePositionsToState(state);
             state.layout.activeIPs = null;
 
-            // Animate every row back to its original position with full opacity.
+            // Compute centered positions on-the-fly using the current container
+            // height (which may differ from when base positions were saved).
+            const chartContainer = d3.select('#chart-container').node();
+            const containerH = chartContainer ? chartContainer.clientHeight : 600;
+            const usableH = Math.max(100, containerH - margin.top - margin.bottom);
             const allIPs = new Set(state.layout.ipOrder);
-            animateIPRowsFilter(svg, d3, allIPs, state.layout.ipPositions, state.layout.ipRowHeights, ROW_GAP);
+            const compact = computeCompactPositions({
+                activeIPs: allIPs,
+                ipOrder: state.layout.ipOrder,
+                baseRowHeights: state.layout.ipRowHeights,
+                containerHeight: usableH,
+                topPad: TOP_PAD,
+            });
 
-            // Restore SVG height from the saved base positions.
-            const lastIp = state.layout.ipOrder[state.layout.ipOrder.length - 1];
-            if (lastIp) {
-                const maxY = state.layout.basePositions.get(lastIp) || 0;
-                const lastH = state.layout.baseRowHeights.get(lastIp) || ROW_GAP;
-                const restoreH = Math.max(500, maxY + lastH + 40 + TOP_PAD);
-                svgContainer.attr('height', restoreH + margin.top + margin.bottom);
-                svg.select('#clip rect').attr('height', restoreH + 80);
+            // Apply centered positions to state (in-place).
+            for (const [ip, y] of compact.positions) {
+                state.layout.ipPositions.set(ip, y);
             }
+
+            // Animate every row to centered positions with full opacity.
+            animateIPRowsFilter(svg, d3, allIPs, compact.positions, compact.rowHeights, ROW_GAP);
+
+            // Size SVG to match the container viewport.
+            const newH = Math.max(usableH, compact.totalHeight + compact.centerOffset);
+            svgContainer.attr('height', newH + margin.top + margin.bottom);
+            svg.select('#clip rect').attr('height', newH + 80);
         } catch(e) { logCatchError('restoreBaseRows', e); }
     };
 
@@ -5180,6 +5189,10 @@ function visualizeTimeArcs(packets) {
         state.layout.subRowOffsets = null;
     }
 
+    // Save base snapshots after all adjustments so the zoom-based row filter
+    // can restore the full unfiltered layout.
+    saveBasePositions(state);
+
     fullDomainBinsCache = { version: state.data.version, data: initialRenderData.binnedPackets, binSize: null, sorted: true };
 
     console.log('[visualizeTimeArcs] Rendering', initialRenderData.binnedPackets.length, 'binned packets to fullDomainLayer');
@@ -5239,6 +5252,67 @@ function visualizeTimeArcs(packets) {
             tickFormatter: null  // dual-band axis handles formatting
         });
     } catch(e) { logCatchError('bottomOverlayResize', e); }
+
+    // Deferred centering: the overview chart renders asynchronously, so the
+    // container height isn't final when visualizeTimeArcs runs. Use a one-shot
+    // ResizeObserver to detect when #chart-container shrinks (overview appears)
+    // and re-centre + re-render at the correct height.
+    {
+        const chartEl = d3.select('#chart-container').node();
+        if (chartEl) {
+            const initialH = chartEl.clientHeight;
+            const centerObs = new ResizeObserver(() => {
+                const newH = chartEl.clientHeight;
+                if (Math.abs(newH - initialH) < 10) return; // ignore tiny shifts
+                centerObs.disconnect();
+                try {
+                    const usableH = Math.max(100, newH - margin.top - margin.bottom);
+                    const allIPs = new Set(state.layout.ipOrder);
+                    const compact = computeCompactPositions({
+                        activeIPs: allIPs,
+                        ipOrder: state.layout.ipOrder,
+                        baseRowHeights: state.layout.ipRowHeights,
+                        containerHeight: usableH,
+                        topPad: TOP_PAD,
+                    });
+                    if (compact.centerOffset > TOP_PAD) {
+                        for (const [ip, y] of compact.positions) {
+                            state.layout.ipPositions.set(ip, y);
+                        }
+                        const newOrder = computeIPPairOrderByRow(packets, state.layout.ipPositions);
+                        state.layout.ipPairOrderByRow.clear();
+                        for (const [k, v] of newOrder) state.layout.ipPairOrderByRow.set(k, v);
+                        applyCollapseOverrides(state.layout.ipPairOrderByRow);
+                        // Update bin yPos and re-render circles via the normal path
+                        for (const d of fullDomainBinsCache.data) {
+                            if (d.src_ip) {
+                                const newY = state.layout.ipPositions.get(d.src_ip);
+                                if (newY !== undefined) d.yPos = newY;
+                            }
+                        }
+                        // Re-render the fullDomainLayer properly (circles + bars)
+                        const rScale = d3.scaleSqrt()
+                            .domain([1, Math.max(1, globalMaxBinCount)])
+                            .range([RADIUS_MIN, RADIUS_MAX]);
+                        renderMarksForLayerLocal(fullDomainLayer, fullDomainBinsCache.data, rScale);
+                        // Move node labels and row highlights
+                        svg.selectAll('.node')
+                            .attr('transform', d => `translate(0,${state.layout.ipPositions.get(d)})`);
+                        svg.selectAll('.row-highlight')
+                            .attr('y', d => (state.layout.ipPositions.get(d) || 0) - ROW_GAP / 2)
+                            .attr('height', d => (state.layout.ipRowHeights && state.layout.ipRowHeights.get(d)) || ROW_GAP);
+                        // Update SVG height
+                        const svgH = Math.max(usableH, compact.totalHeight + compact.centerOffset);
+                        svgContainer.attr('height', svgH + margin.top + margin.bottom);
+                        svg.select('#clip rect').attr('height', svgH + (2 * DOT_RADIUS));
+                        // Save centered positions as base
+                        saveBasePositions(state);
+                    }
+                } catch(e) { logCatchError('resizeObserverCentering', e); }
+            });
+            centerObs.observe(chartEl);
+        }
+    }
 }
 
 // Make resize handler available globally for testing and debugging
