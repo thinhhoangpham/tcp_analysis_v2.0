@@ -3,6 +3,13 @@
 
 import * as d3 from 'https://cdn.jsdelivr.net/npm/d3@7/+esm';
 import { highlightHoveredLink, unhighlightLinks, getLinkHighlightInfo, highlightEndpointLabels, unhighlightEndpointLabels, showArcArrowhead, removeArrowheads } from './highlightUtils.js';
+import { FLOW_ARC_SEARCH_MATCH_OPACITY, FLOW_ARC_SEARCH_DIM_OPACITY } from '../config/constants.js';
+
+function _pairKey(src, tgt) {
+    const a = src < tgt ? src : tgt;
+    const b = src < tgt ? tgt : src;
+    return a + '<->' + b;
+}
 
 /**
  * Create arc hover handler.
@@ -16,6 +23,7 @@ import { highlightHoveredLink, unhighlightLinks, getLinkHighlightInfo, highlight
  * @param {Function} config.colorForAttack - Function to get color for attack type
  * @param {Function} config.showTooltip - Function to show tooltip
  * @param {Function} config.getLabelMode - Getter for label mode ('attack' or 'attack_group')
+ * @param {Function} [config.getDataMode] - Optional getter for data mode ('attacks' | 'flows')
  * @param {Function} config.toDate - Function to convert minute to Date
  * @param {Function} config.timeFormatter - Function to format time
  * @param {boolean} config.looksAbsolute - Whether timestamps are absolute
@@ -38,6 +46,7 @@ export function createArcHoverHandler(config) {
     colorForAttack,
     showTooltip,
     getLabelMode,
+    getDataMode,
     toDate,
     timeFormatter,
     looksAbsolute,
@@ -123,10 +132,16 @@ export function createArcHoverHandler(config) {
     // Show tooltip
     const dt = toDate(d.minute);
     const timeStr = looksAbsolute ? timeFormatter(dt) : `t=${d.minute - base} ${unitSuffix}`;
+    let typeLabel;
+    if (getDataMode && getDataMode() === 'flows') {
+      typeLabel = `Flow Type: ${d.attack || 'unknown'}<br>Category: ${d.attack_group || 'unknown'}<br>`;
+    } else if (getLabelMode() === 'attack_group') {
+      typeLabel = `Attack Group: ${d.attack_group || 'normal'}<br>`;
+    } else {
+      typeLabel = `Attack: ${d.attack || 'normal'}<br>`;
+    }
     const content = `${d.sourceNode.name} → ${d.targetNode.name}<br>` +
-      (getLabelMode() === 'attack_group'
-        ? `Attack Group: ${d.attack_group || 'normal'}<br>`
-        : `Attack: ${d.attack || 'normal'}<br>`) +
+      typeLabel +
       `${timeStr}<br>` +
       `count=${d.count}`;
 
@@ -178,7 +193,8 @@ export function createArcLeaveHandler(config) {
     getLabelsCompressedMode,
     marginLeft,
     ipToComponent,
-    getComponentExpansionState
+    getComponentExpansionState,
+    getSearchHighlightState
   } = config;
 
   return function() {
@@ -187,8 +203,20 @@ export function createArcLeaveHandler(config) {
     // Remove arrowhead overlay
     removeArrowheads(svg);
 
-    // Restore default opacity
-    unhighlightLinks(arcPaths, widthScale);
+    // Restore opacity — respect active search highlight
+    const searchState = getSearchHighlightState ? getSearchHighlightState() : null;
+    if (searchState && searchState.active) {
+      arcPaths.style('stroke-opacity', d => {
+        const src = d.sourceIp || d.sourceNode?.name || '';
+        const tgt = d.targetIp || d.targetNode?.name || '';
+        const pk = _pairKey(src, tgt);
+        return searchState.matchedPairKeys.has(pk)
+          ? FLOW_ARC_SEARCH_MATCH_OPACITY
+          : FLOW_ARC_SEARCH_DIM_OPACITY;
+      }).attr('stroke-width', d => widthScale(Math.max(1, d.count)));
+    } else {
+      unhighlightLinks(arcPaths, widthScale);
+    }
 
     // Restore row lines
     svg.selectAll('.row-line')

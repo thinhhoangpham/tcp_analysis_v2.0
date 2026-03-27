@@ -33,7 +33,10 @@ export function linkArc(d) {
 export function gradientIdForLink(d, sanitizeId) {
   const src = d.sourceIp || (typeof d.source === 'string' ? d.source : d.source?.name);
   const tgt = d.targetIp || (typeof d.target === 'string' ? d.target : d.target?.name);
-  return `grad-${sanitizeId(`${src}__${tgt}__${d.minute}`)}`;
+  // Include attack type to ensure unique IDs when groupByAttack produces
+  // multiple links for the same (src, dst, minute) with different types
+  const attack = d.attack || '';
+  return `grad-${sanitizeId(`${src}__${tgt}__${d.minute}__${attack}`)}`;
 }
 
 // === Bar Diagram Arc Generator ===

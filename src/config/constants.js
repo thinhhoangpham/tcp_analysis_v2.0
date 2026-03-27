@@ -28,6 +28,11 @@ export const PROTOCOL_COLORS = new Map([
 ]);
 
 export const DEFAULT_COLOR = '#6c757d';
+
+// Flow arc pattern search highlight opacities
+export const FLOW_ARC_SEARCH_MATCH_OPACITY = 0.85;
+export const FLOW_ARC_SEARCH_DIM_OPACITY = 0.08;
+export const FLOW_ARC_SEARCH_BAND_OPACITY = 0.3;
 export const NEUTRAL_GREY = '#9e9e9e';
 
 export const LENS_DEFAULTS = {

@@ -494,6 +494,8 @@ function matchesEventName(event, name) {
     if (event.phase !== undefined) return event.phase === name;
     // Level 3 — sequence contains a single { outcome } element
     if (event.outcome !== undefined) return event.outcome === name;
+    // Level 4 — flow arc close-type temporal phases
+    if (event.closeType !== undefined) return event.closeType === name;
     return false;
 }
 
@@ -503,6 +505,8 @@ function compileCondition({ key, op, val }) {
     return (event) => {
         const actual = getEventAttribute(event, key);
         if (actual === undefined) return false;
+        // For port constraints: port=0 means "unknown" → treat as matching any value
+        if (key === 'port' && actual === 0) return true;
         return compare(actual, op, expected);
     };
 }
@@ -541,6 +545,18 @@ function getEventAttribute(event, key) {
             case 'duration': return event.duration;
             case 'packets':  return event.packets;
             case 'bytes':    return event.bytes;
+        }
+    }
+    // Level 4 — flow arc close-type temporal phases
+    if (event.closeType !== undefined) {
+        switch (key) {
+            case 'ratio':    return event.ratio;
+            case 'volume':   return event.volumeLabel;
+            case 'count':    return event.totalCount;
+            case 'bins':     return event.binCount;
+            case 'dur':
+            case 'duration': return event.minuteEnd - event.minuteStart;
+            case 'port':     return event.port;  // 0 = unknown port
         }
     }
     return undefined;
@@ -590,13 +606,14 @@ export function parsePattern(patternString) {
 /**
  * Compile an AST into a MatcherFunction.
  * @param {Object} ast - From parsePattern()
- * @param {number} level - 1, 2, or 3
+ * @param {number} level - 1, 2, 3, or 4
  * @returns {Function} Compiled matcher
  */
 export function compilePattern(ast, level) {
     if (level === 3) {
         return compileLevel3(ast);
     }
+    // Levels 1, 2, and 4 all use the sequence matcher
     return compileNode(ast);
 }
 

@@ -17,6 +17,8 @@ import { loadAllMappings } from './src/mappings/loaders.js';
 import { setupWindowResizeHandler as setupWindowResizeHandlerFromModule } from './src/interaction/resize.js';
 import { ForceNetworkLayout } from './src/layout/force_network.js';
 import { TimearcsLayout } from './src/layout/timearcs_layout.js';
+import { initFlowArcSearchPanel, showFlowArcSearchResults, clearFlowArcSearchResults, showFlowArcSearchProgress, hideFlowArcSearchProgress, setFlowArcSearchPanelVisible } from './src/ui/flow-arc-search-panel.js';
+import { FlowArcSearchEngine } from './src/search/flow-arc-search-engine.js';
 
 // Network TimeArcs visualization
 // Input CSV schema: timestamp,length,src_ip,dst_ip,protocol,count
@@ -194,13 +196,30 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
   // User-selected labeling mode: 'timearcs' or 'force_layout'
   let labelMode = 'force_layout';
 
+  // Data source mode: 'attacks' (attack event arcs) or 'flows' (TCP flow arcs)
+  let dataMode = 'attacks';
+
+  // Flow color maps (loaded lazily from flow_colors.json)
+  let flowColorMap = new Map();   // close_type → hex color
+  let flowColorsLoaded = false;
+
   // Force layout mode state
   let layoutMode = 'force_layout'; // 'timearcs' | 'force_layout'
   let forceLayout = null;      // ForceNetworkLayout instance (null when in timearcs mode)
   let forceLayoutLayer = null;  // <g> for force layout rendering
   let timearcsLayout = null;   // TimearcsLayout instance
   let layoutTransitionInProgress = false; // Guard against rapid switching
-  
+
+  // Flow arc pattern search state
+  let flowArcSearchEngine = null;
+  let flowArcSearchResults = null;
+  let flowArcSearchPanelInit = false;
+
+  function getFlowArcSearchState() {
+    if (!flowArcSearchResults || !flowArcSearchResults.matchedPairKeys || flowArcSearchResults.matchedPairKeys.size === 0) return null;
+    return { active: true, matchedPairKeys: flowArcSearchResults.matchedPairKeys };
+  }
+
   // Timestamp information (needed for export)
   let currentTimeInfo = null; // Stores {unit, looksAbsolute, unitMs, base, activeLabelKey}
   // (Brush selection, persistent selections, component expansion, and drag state
@@ -236,6 +255,27 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     } else if (prev === 'force_layout' && newMode === 'timearcs') {
       transitionToTimearcs();
     }
+  }));
+
+  // Data source mode: Attack Events vs TCP Flows
+  const dataModeRadios = document.querySelectorAll('input[name="dataMode"]');
+  const dataSourceFieldset = document.getElementById('dataSourceFieldset');
+
+  dataModeRadios.forEach(r => r.addEventListener('change', async () => {
+    const sel = Array.from(dataModeRadios).find(r => r.checked);
+    const newDataMode = sel ? sel.value : 'attacks';
+    if (newDataMode === dataMode) return;
+    if (layoutTransitionInProgress) return;
+
+    dataMode = newDataMode;
+
+    // Load flow colors on first switch
+    if (dataMode === 'flows' && !flowColorsLoaded) {
+      await loadFlowColors();
+    }
+
+    // Full teardown + reload with new data source
+    await switchDataMode();
   }));
 
   // Handle bifocal compression slider
@@ -373,7 +413,11 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
   // Initialize mappings, then try a default CSV load
   (async function init() {
     try {
-      const mappings = await loadAllMappings(canonicalizeName);
+      // Load attack mappings and flow colors in parallel
+      const [mappings] = await Promise.all([
+        loadAllMappings(canonicalizeName),
+        loadFlowColors()
+      ]);
       ipIdToAddr = mappings.ipIdToAddr;
       ipMapLoaded = ipIdToAddr !== null && ipIdToAddr.size > 0;
       attackIdToName = mappings.attackIdToName;
@@ -382,9 +426,6 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
       attackGroupIdToName = mappings.attackGroupIdToName;
       colorByAttackGroup = mappings.colorByAttackGroup;
       rawColorByAttackGroup = mappings.rawColorByAttackGroup;
-
-      if (ipMapLoaded) {
-      }
     } catch (err) {
       console.warn('Mapping load failed:', err);
     }
@@ -863,10 +904,8 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     const activeLabelKey = labelMode === 'force_layout' ? 'attack_group' : 'attack';
     console.log(`Switching to ${activeLabelKey} label mode (lightweight update)`);
 
-    // Helper to get color for current label mode
-    const colorForAttack = (name) => {
-      return _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
-    };
+    // Helper to get color for current mode
+    const colorForAttack = getActiveColorForAttack();
 
     // 1. Update arc data attributes (for filtering)
     timearcsLayout._arcPaths.attr('data-attack', d => d[activeLabelKey] || 'normal');
@@ -948,9 +987,7 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     const activeLabelKey = 'attack_group';
 
     // Use same color priority as timearcs for consistency
-    const colorForAttack = (name) => {
-      return _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
-    };
+    const colorForAttack = getActiveColorForAttack();
 
     // Build initial positions (center X, timearcs Y) for force simulation seed
     const drawWidth = width - MARGIN.left - MARGIN.right;
@@ -1038,6 +1075,10 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     // Hide compression slider (magnification not applicable in force mode)
     if (compressionSlider) compressionSlider.closest('div').style.display = 'none';
 
+    // Disable data source toggle in force layout mode (flows only meaningful in timearcs)
+    if (dataSourceFieldset) dataSourceFieldset.style.opacity = '0.4';
+    dataModeRadios.forEach(r => r.disabled = true);
+
     layoutTransitionInProgress = false;
     setStatus(statusEl, `${ctx.allIps.length} IPs • ${attacks.length} attacks • ${ctx.linksWithNodes.length} links`);
   }
@@ -1054,9 +1095,7 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     }
 
     const activeLabelKey = 'attack_group';
-    const colorForAttack = (name) => {
-      return _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
-    };
+    const colorForAttack = getActiveColorForAttack();
 
     // Arrange IPs in a circle for well-spaced initial positions
     // (avoids NaN from cramped vertical line with many IPs)
@@ -1107,6 +1146,10 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
 
     // Hide compression slider
     if (compressionSlider) compressionSlider.closest('div').style.display = 'none';
+
+    // Disable data source toggle in force layout mode
+    if (dataSourceFieldset) dataSourceFieldset.style.opacity = '0.4';
+    dataModeRadios.forEach(r => r.disabled = true);
 
     setStatus(statusEl, `${ctx.allIps.length} IPs • ${attacks.length} attacks • ${ctx.linksWithNodes.length} links`);
   }
@@ -1257,6 +1300,10 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
     // Show compression slider
     if (compressionSlider) compressionSlider.closest('div').style.display = '';
 
+    // Re-enable data source toggle in timearcs mode
+    if (dataSourceFieldset) dataSourceFieldset.style.opacity = '';
+    dataModeRadios.forEach(r => r.disabled = false);
+
     // Restore timearcs SVG height (may have been deferred during initial force layout load)
     if (timearcsLayout && timearcsLayout._cachedDynamicHeight) {
       svg.attr('height', timearcsLayout._cachedDynamicHeight);
@@ -1272,10 +1319,7 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
       const attacks = timearcsLayout._attacks;
       visibleAttacks = new Set(attacks);
       currentLabelMode = labelMode;
-      const colorForAttack = (name) => {
-        return _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
-      };
-      buildLegend(attacks, colorForAttack);
+      buildLegend(attacks, getActiveColorForAttack());
     }
 
     layoutTransitionInProgress = false;
@@ -1285,6 +1329,7 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
   }
 
   function buildLegend(items, colorFn) {
+    updateLegendTitle();
     createLegend(legendEl, items, colorFn, visibleAttacks, {
       onToggle: (attackName) => {
         if (visibleAttacks.has(attackName)) {
@@ -1315,10 +1360,11 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
       timearcsLayout = new TimearcsLayout({
         svg, container, tooltip,
         width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT,
-        colorForAttack: (name) => _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR,
+        colorForAttack: getActiveColorForAttack(),
         getLabelMode: () => labelMode,
         getLayoutMode: () => layoutMode,
         getForceLayout: () => forceLayout,
+        getDataMode: () => dataMode,
         onRenderComplete: (ctx) => {
           // Sync time info needed by openDetailsInNewTab
           currentTimeInfo = {
@@ -1351,11 +1397,58 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
         onDetailsRequested: (selection) => openDetailsInNewTab(selection),
         onSelectionChange: null,
         statusEl,
-        bifocalRegionText
+        bifocalRegionText,
+        getFlowArcSearchState
       });
     }
 
     await timearcsLayout.render(data, isRenderingFilteredData, originalData);
+
+    // Initialize flow arc search panel on first flow-mode render
+    if (dataMode === 'flows' && !flowArcSearchPanelInit) {
+      _initFlowArcSearchPanel();
+    }
+    setFlowArcSearchPanelVisible(dataMode === 'flows');
+
+    // Re-apply search highlight after filtered re-renders (e.g., legend toggle)
+    if (flowArcSearchResults && dataMode === 'flows' && timearcsLayout) {
+      timearcsLayout.applyFlowArcSearchHighlight(flowArcSearchResults);
+    }
+  }
+
+  function _initFlowArcSearchPanel() {
+    flowArcSearchPanelInit = true;
+    initFlowArcSearchPanel({
+      onSearch: (patternString, opts) => {
+        if (!timearcsLayout || !timearcsLayout._linksWithNodes) return;
+        flowArcSearchEngine = new FlowArcSearchEngine({
+          getLinksWithNodes: () => timearcsLayout._linksWithNodes,
+        });
+        showFlowArcSearchProgress('Searching...');
+        const results = flowArcSearchEngine.search(patternString, opts);
+        flowArcSearchResults = results;
+        hideFlowArcSearchProgress();
+        showFlowArcSearchResults(results, getActiveColorForAttack());
+        if (timearcsLayout) timearcsLayout.applyFlowArcSearchHighlight(results);
+      },
+      onFanSearch: (type, closeType, threshold, withinMinutes) => {
+        if (!timearcsLayout || !timearcsLayout._linksWithNodes) return;
+        flowArcSearchEngine = new FlowArcSearchEngine({
+          getLinksWithNodes: () => timearcsLayout._linksWithNodes,
+        });
+        showFlowArcSearchProgress('Searching...');
+        const results = flowArcSearchEngine.evaluateFanPattern(type, closeType, threshold, withinMinutes);
+        flowArcSearchResults = results;
+        hideFlowArcSearchProgress();
+        showFlowArcSearchResults(results, getActiveColorForAttack());
+        if (timearcsLayout) timearcsLayout.applyFlowArcSearchHighlight(results);
+      },
+      onClear: () => {
+        flowArcSearchResults = null;
+        clearFlowArcSearchResults();
+        if (timearcsLayout) timearcsLayout.clearFlowArcSearchHighlight();
+      },
+    });
   }
 
   function openDetailsInNewTab(selection) {
@@ -1917,6 +2010,183 @@ import { TimearcsLayout } from './src/layout/timearcs_layout.js';
   const _decodeAttackGroup = (groupVal, fallbackVal) => decodeAttackGroup(groupVal, fallbackVal, attackGroupIdToName, attackIdToName);
   const _lookupAttackColor = (name) => lookupAttackColor(name, rawColorByAttack, colorByAttack);
   const _lookupAttackGroupColor = (name) => lookupAttackGroupColor(name, rawColorByAttackGroup, colorByAttackGroup);
+
+  // ═══════════════════════════════════════════════════════════
+  // Flow data mode: color loading, lookup, and data switching
+  // ═══════════════════════════════════════════════════════════
+
+  async function loadFlowColors() {
+    if (flowColorsLoaded) return;
+    flowColorsLoaded = true; // set before await to prevent concurrent calls
+    try {
+      const res = await fetch('./flow_colors.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const obj = await res.json();
+      flowColorMap = new Map();
+      // Flatten nested { category: { close_type: color } } into flat map
+      for (const [category, typeMap] of Object.entries(obj)) {
+        if (typeof typeMap === 'object' && typeMap !== null) {
+          for (const [closeType, color] of Object.entries(typeMap)) {
+            flowColorMap.set(closeType, color);
+          }
+          // Also map category name to first member's color (for attack_group coloring)
+          const firstColor = Object.values(typeMap)[0];
+          if (firstColor && !flowColorMap.has(category)) {
+            flowColorMap.set(category, firstColor);
+          }
+        }
+      }
+      // Add fallback colors for categories not in the JSON
+      if (!flowColorMap.has('ongoing')) flowColorMap.set('ongoing', '#6c757d');
+      if (!flowColorMap.has('closing')) flowColorMap.set('closing', '#66bb6a');
+      if (!flowColorMap.has('invalid')) flowColorMap.set('invalid', '#ff0000');
+      console.log(`Flow colors loaded: ${flowColorMap.size} entries`);
+    } catch (err) {
+      console.warn('Failed to load flow_colors.json:', err);
+    }
+  }
+
+  function _lookupFlowColor(name) {
+    if (!name) return DEFAULT_COLOR;
+    return flowColorMap.get(name) || DEFAULT_COLOR;
+  }
+
+  /**
+   * Return the active color function based on current dataMode.
+   * This is called every time a color closure is needed, ensuring
+   * mode switches produce fresh closures.
+   */
+  function getActiveColorForAttack() {
+    if (dataMode === 'flows') {
+      return (name) => _lookupFlowColor(name);
+    }
+    return (name) => _lookupAttackColor(name) || _lookupAttackGroupColor(name) || DEFAULT_COLOR;
+  }
+
+  function updateLegendTitle() {
+    const titleEl = document.getElementById('legendPanelTitle');
+    if (titleEl) {
+      titleEl.textContent = dataMode === 'flows' ? 'Flow Types' : 'Attack Types';
+    }
+  }
+
+  /**
+   * Switch data mode: tear down current viz, reload with appropriate CSV.
+   */
+  async function switchDataMode() {
+    layoutTransitionInProgress = true;
+
+    // Same cleanup as file upload handler
+    if (originalData) { originalData.length = 0; originalData = null; }
+    visibleAttacks.clear();
+    currentPairsByFile = null;
+    lastRawCsvRows = null;
+
+    // Reset flow arc search state
+    flowArcSearchResults = null;
+    flowArcSearchPanelInit = false;
+    clearFlowArcSearchResults();
+    setFlowArcSearchPanelVisible(false);
+
+    if (timearcsLayout) { timearcsLayout.destroy(); timearcsLayout = null; }
+    if (forceLayout) { forceLayout.destroy(); forceLayout = null; }
+    if (forceLayoutLayer) { forceLayoutLayer.remove(); forceLayoutLayer = null; }
+
+    svg.selectAll('*').remove();
+    d3.select('#axis-top').selectAll('*').remove();
+
+    updateLegendTitle();
+
+    // Reset to timearcs mode for flow data and disable force layout toggle
+    if (dataMode === 'flows') {
+      if (layoutMode === 'force_layout') {
+        layoutMode = 'timearcs';
+        labelMode = 'timearcs';
+        document.getElementById('labelModeTimearcs').checked = true;
+      }
+      // Disable Network View radio — flows only meaningful in timearcs
+      labelModeRadios.forEach(r => { r.disabled = r.value === 'force_layout'; });
+    } else {
+      // Re-enable all layout mode radios when switching back to attacks
+      labelModeRadios.forEach(r => { r.disabled = false; });
+    }
+
+    // Reload appropriate default CSV
+    if (dataMode === 'flows') {
+      await tryLoadFlowCsv();
+    } else {
+      await tryLoadDefaultCsv();
+    }
+
+    layoutTransitionInProgress = false;
+  }
+
+  /**
+   * Load flow CSV data (parallel of tryLoadDefaultCsv for flow mode).
+   */
+  async function tryLoadFlowCsv() {
+    const defaultPath = './flow_set1_first90_minutes.csv';
+    try {
+      const res = await fetch(defaultPath, { cache: 'no-store' });
+      if (!res.ok) {
+        setStatus(statusEl, 'Flow CSV not found. Generate with: python packets_data/flow_bins_to_csv.py');
+        return;
+      }
+      const text = await res.text();
+      const rows = d3.csvParse((text || '').trim());
+      lastRawCsvRows = rows;
+
+      // Flow CSV: src_ip/dst_ip are dotted-quad strings, attack=close_type, attack_group=category
+      const data = rows.map((d, i) => ({
+        idx: i,
+        timestamp: toNumber(d.timestamp),
+        length: toNumber(d.length) || 0,
+        src_ip: (d.src_ip || '').trim(),
+        dst_ip: (d.dst_ip || '').trim(),
+        protocol: (d.protocol || '').toUpperCase() || 'TCP',
+        count: toNumber(d.count) || 1,
+        attack: (d.attack || 'unknown').trim(),
+        attack_group: (d.attack_group || 'unknown').trim(),
+        dst_port: toNumber(d.dst_port) || 0,
+      })).filter(d => {
+        const hasValidTimestamp = isFinite(d.timestamp);
+        const hasValidSrcIp = d.src_ip && d.src_ip.includes('.');
+        const hasValidDstIp = d.dst_ip && d.dst_ip.includes('.');
+        return hasValidTimestamp && hasValidSrcIp && hasValidDstIp;
+      });
+
+      if (!data.length) {
+        setStatus(statusEl, 'Flow CSV contained no valid rows');
+        return;
+      }
+
+      // Track file info
+      let minTime = Infinity, maxTime = -Infinity;
+      for (let i = 0; i < data.length; i++) {
+        const ts = data[i].timestamp;
+        if (isFinite(ts)) {
+          if (ts < minTime) minTime = ts;
+          if (ts > maxTime) maxTime = ts;
+        }
+      }
+      loadedFileInfo = [{
+        fileName: 'flow_set1_first90_minutes.csv',
+        decodedFileName: 'flow_set1_first90_minutes.csv',
+        filePath: defaultPath,
+        minTime: minTime === Infinity ? null : minTime,
+        maxTime: maxTime === -Infinity ? null : maxTime,
+        recordCount: data.length,
+        setNumber: 1,
+        dayNumber: null
+      }];
+      updateDatasetConfig();
+
+      render(data);
+    } catch (err) {
+      console.warn('Flow CSV load failed:', err);
+      setStatus(statusEl, 'Error loading flow CSV');
+    }
+  }
 
   // Export network data for a specific connected component as CSV
   function exportComponentCSV(compIdx, components, ipToComponent, linksWithNodes, data) {

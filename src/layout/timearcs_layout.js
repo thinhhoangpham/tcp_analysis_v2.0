@@ -2,7 +2,7 @@
 // Mirrors the ForceNetworkLayout pattern: one class, constructor options,
 // separate setData() and render() calls, pull-based context retrieval.
 
-import { MARGIN, INNER_HEIGHT, MIN_IP_SPACING, MIN_IP_SPACING_WITHIN_COMPONENT, INTER_COMPONENT_GAP, DEFAULT_COLOR, NEUTRAL_GREY } from '../config/constants.js';
+import { MARGIN, INNER_HEIGHT, MIN_IP_SPACING, MIN_IP_SPACING_WITHIN_COMPONENT, INTER_COMPONENT_GAP, DEFAULT_COLOR, NEUTRAL_GREY, FLOW_ARC_SEARCH_MATCH_OPACITY, FLOW_ARC_SEARCH_DIM_OPACITY, FLOW_ARC_SEARCH_BAND_OPACITY } from '../config/constants.js';
 import { sanitizeId, showTooltip, hideTooltip, setStatus } from '../utils/helpers.js';
 import { linkArc, gradientIdForLink } from '../rendering/arcPath.js';
 import { computeIpSpans, createSpanData, renderRowLines, renderIpLabels, renderComponentToggles, updateComponentToggles, showComponentToggles, createLabelHoverHandler, createLabelMoveHandler, createLabelLeaveHandler, attachLabelHoverHandlers } from '../rendering/rows.js';
@@ -26,6 +26,7 @@ export class TimearcsLayout {
    * @param {Function} options.getLabelMode    - () => 'timearcs'|'force_layout'
    * @param {Function} options.getLayoutMode   - () => 'timearcs'|'force_layout'
    * @param {Function} options.getForceLayout  - () => ForceNetworkLayout|null
+   * @param {Function} [options.getDataMode]    - () => 'attacks'|'flows' (optional, defaults to 'attacks')
    * @param {Function} options.onRenderComplete  - callback(ctx) after animation completes
    * @param {Function} options.onDetailsRequested - callback(selection) for "View Details"
    * @param {Function} options.onSelectionChange  - callback(status) on brush change
@@ -37,8 +38,10 @@ export class TimearcsLayout {
       svg, container, tooltip,
       width, height,
       colorForAttack, getLabelMode, getLayoutMode, getForceLayout,
+      getDataMode,
       onRenderComplete, onDetailsRequested, onSelectionChange,
-      statusEl, bifocalRegionText
+      statusEl, bifocalRegionText,
+      getFlowArcSearchState
     } = options;
 
     // External references
@@ -51,11 +54,15 @@ export class TimearcsLayout {
     this._getLabelMode = getLabelMode;
     this._getLayoutMode = getLayoutMode;
     this._getForceLayout = getForceLayout;
+    this._getDataMode = getDataMode || (() => 'attacks');
     this._onRenderComplete = onRenderComplete;
     this._onDetailsRequested = onDetailsRequested;
     this._onSelectionChange = onSelectionChange;
     this._statusEl = statusEl;
     this._bifocalRegionText = bifocalRegionText;
+    this._getFlowArcSearchState = getFlowArcSearchState || (() => null);
+    this._flowArcSearchActive = false;
+    this._flowArcSearchMatchedKeys = null;
 
     // ── Bifocal state ──────────────────────────────────────────────
     this._bifocalEnabled = true;
@@ -300,6 +307,160 @@ export class TimearcsLayout {
     this._redrawAllPersistentSelections();
   }
 
+  // ─── Flow Arc Search Highlighting ──────────────────────────────────
+
+  /**
+   * Highlight arcs matching a flow arc pattern search.
+   * Dims non-matched arcs, bolds matched IP labels, draws time axis bands.
+   * @param {FlowArcSearchResults} results
+   */
+  applyFlowArcSearchHighlight(results) {
+    if (!this._arcPaths || !results) return;
+
+    const matchedPairKeys = results.matchedPairKeys;
+
+    const _canonPK = (src, tgt) => {
+      const a = src < tgt ? src : tgt;
+      const b = src < tgt ? tgt : src;
+      return a + '<->' + b;
+    };
+
+    // 1. Dim/highlight arcs
+    this._arcPaths.style('stroke-opacity', d => {
+      const src = d.sourceIp || d.sourceNode?.name || '';
+      const tgt = d.targetIp || d.targetNode?.name || '';
+      const pk = _canonPK(src, tgt);
+      return matchedPairKeys.has(pk)
+        ? FLOW_ARC_SEARCH_MATCH_OPACITY
+        : FLOW_ARC_SEARCH_DIM_OPACITY;
+    });
+
+    // 2. Bold IP labels for matched pairs
+    const matchedIPs = new Set();
+    for (const pk of matchedPairKeys) {
+      const [a, b] = pk.split('<->');
+      matchedIPs.add(a);
+      matchedIPs.add(b);
+    }
+    const labelSel = this._svg.selectAll('.ip-label, .node-label');
+    labelSel
+      .attr('font-weight', function() {
+        const ip = d3.select(this).text();
+        return matchedIPs.has(ip) ? 'bold' : null;
+      })
+      .style('opacity', function() {
+        const ip = d3.select(this).text();
+        return matchedIPs.has(ip) ? 1 : 0.25;
+      });
+
+    // 3. Draw close_type badge dots next to matched IP labels
+    // Build Map<ip, Map<closeType, {color, dstPort}>>
+    const ipCloseTypes = new Map();
+    for (const link of results.matchedLinks) {
+      const src = link.sourceIp || link.sourceNode?.name || '';
+      const tgt = link.targetIp || link.targetNode?.name || '';
+      const closeType = link.attack || '';
+      const dstPort = link.dst_port ?? null;
+      for (const ip of [src, tgt]) {
+        if (!ip || !matchedIPs.has(ip)) continue;
+        if (!ipCloseTypes.has(ip)) ipCloseTypes.set(ip, new Map());
+        if (!ipCloseTypes.get(ip).has(closeType)) {
+          ipCloseTypes.get(ip).set(closeType, { color: this._colorForAttack(closeType), dstPort });
+        }
+      }
+    }
+
+    // Remove stale badges before drawing new ones
+    this._svg.selectAll('.flow-arc-match-badge').remove();
+
+    const BADGE_R = 4;
+    const BADGE_GAP = 10;
+    const BADGE_LABEL_OFFSET = 8; // px to the right of label x (labels are text-anchor:end so x is right edge)
+
+    labelSel.each((ip, i, nodes) => {
+      if (!ipCloseTypes.has(ip)) return;
+      const labelEl = nodes[i];
+      const labelX = parseFloat(d3.select(labelEl).attr('x') || 0);
+      const labelY = parseFloat(d3.select(labelEl).attr('y') || 0);
+
+      const closeTypeEntries = Array.from(ipCloseTypes.get(ip).entries());
+      closeTypeEntries.forEach(([closeType, { color, dstPort }], idx) => {
+        const cx = labelX + BADGE_LABEL_OFFSET + idx * (BADGE_R * 2 + BADGE_GAP);
+        const cy = labelY;
+        const tooltipText = dstPort != null
+          ? `${closeType} (port ${dstPort})`
+          : closeType;
+
+        this._svg.append('circle')
+          .attr('class', 'flow-arc-match-badge')
+          .attr('cx', cx)
+          .attr('cy', cy)
+          .attr('r', BADGE_R)
+          .attr('fill', color)
+          .attr('stroke', '#fff')
+          .attr('stroke-width', 1)
+          .style('cursor', 'default')
+          .style('pointer-events', 'all')
+          .on('mouseover', (event) => showTooltip(this._tooltip, event, tooltipText))
+          .on('mousemove', (event) => {
+            if (this._tooltip && this._tooltip.style.display !== 'none') {
+              this._tooltip.style.left = (event.clientX + 10) + 'px';
+              this._tooltip.style.top = (event.clientY + 10) + 'px';
+            }
+          })
+          .on('mouseout', () => hideTooltip(this._tooltip));
+      });
+    });
+
+    // 4. Draw time axis bands for matched time ranges
+    const axisSvg = d3.select('#axis-top');
+    axisSvg.selectAll('.flow-arc-match-band').remove();
+    if (results.matchedTimeRanges && this._xScaleLens) {
+      for (const [pairKey, ranges] of results.matchedTimeRanges) {
+        for (const { minuteStart, minuteEnd } of ranges) {
+          const x1 = this._xScaleLens(minuteStart);
+          const x2 = this._xScaleLens(minuteEnd);
+          if (!isFinite(x1) || !isFinite(x2)) continue;
+          axisSvg.append('rect')
+            .attr('class', 'flow-arc-match-band')
+            .attr('x', Math.min(x1, x2))
+            .attr('y', 31)
+            .attr('width', Math.max(2, Math.abs(x2 - x1)))
+            .attr('height', 4)
+            .attr('fill', '#ff9800')
+            .attr('opacity', FLOW_ARC_SEARCH_BAND_OPACITY)
+            .style('pointer-events', 'none');
+        }
+      }
+    }
+
+    // 5. Store state for hover-leave restoration
+    this._flowArcSearchActive = true;
+    this._flowArcSearchMatchedKeys = matchedPairKeys;
+  }
+
+  /**
+   * Clear flow arc search highlighting — restore default appearance.
+   */
+  clearFlowArcSearchHighlight() {
+    if (this._arcPaths) {
+      this._arcPaths.style('stroke-opacity', 0.6);
+    }
+
+    // Remove time axis bands and badge dots
+    d3.select('#axis-top').selectAll('.flow-arc-match-band').remove();
+    this._svg?.selectAll('.flow-arc-match-badge').remove();
+
+    // Reset IP label styling
+    const labelSel = this._svg?.selectAll('.ip-label, .node-label');
+    if (labelSel) {
+      labelSel.attr('font-weight', null).style('opacity', null);
+    }
+
+    this._flowArcSearchActive = false;
+    this._flowArcSearchMatchedKeys = null;
+  }
+
   /** Destroy: stop everything and null DOM references. */
   destroy() {
     this._arcPaths = null;
@@ -358,7 +519,8 @@ export class TimearcsLayout {
 
     // ── Links / nodes ─────────────────────────────────────────────
     const activeLabelKey = labelMode === 'force_layout' ? 'attack_group' : 'attack';
-    const links = computeLinks(data);
+    const dataMode = this._getDataMode();
+    const links = computeLinks(data, { groupByAttack: dataMode === 'flows' });
 
     const allIpsFromLinks = new Set();
     links.forEach(l => { allIpsFromLinks.add(l.source); allIpsFromLinks.add(l.target); });
@@ -387,7 +549,7 @@ export class TimearcsLayout {
     // ── Attacks list ──────────────────────────────────────────────
     const originalLinks = (data === originalData)
       ? links
-      : computeLinks(originalData || data);
+      : computeLinks(originalData || data, { groupByAttack: dataMode === 'flows' });
     const attacks = Array.from(new Set(originalLinks.map(l => l[activeLabelKey] || 'normal'))).sort();
     this._attacks = attacks;
 
@@ -611,6 +773,7 @@ export class TimearcsLayout {
       colorForAttack,
       showTooltip: (evt, html) => showTooltip(this._tooltip, evt, html),
       getLabelMode: () => this._getLabelMode(),
+      getDataMode: () => this._getDataMode(),
       toDate, timeFormatter: utcTick, looksAbsolute, unitSuffix, base,
       getLabelsCompressedMode: () => this._labelsCompressedMode,
       marginLeft: MARGIN.left,
@@ -625,7 +788,8 @@ export class TimearcsLayout {
       getLabelsCompressedMode: () => this._labelsCompressedMode,
       marginLeft: MARGIN.left,
       ipToComponent,
-      getComponentExpansionState: () => this._componentExpansionState
+      getComponentExpansionState: () => this._componentExpansionState,
+      getSearchHighlightState: this._getFlowArcSearchState
     });
     attachArcHandlers(arcPaths, arcHoverHandler, arcMoveHandler, arcLeaveHandler);
 

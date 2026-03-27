@@ -46,25 +46,33 @@ export function computeConnectivityFromRelationships(relationships, threshold, a
 /**
  * Compute aggregated links per (src, dst, minute).
  * @param {Object[]} data - Processed records
+ * @param {Object} [options]
+ * @param {boolean} [options.groupByAttack=false] - When true, include attack type in grouping key
+ *   so each (src, dst, minute, attack) becomes a separate link. Used for flow data where
+ *   different close types should produce distinct arcs.
  * @returns {Object[]}
  */
-export function computeLinks(data) {
-  const keyOf = (src, dst, m) => `${src}__${dst}__${m}`;
+export function computeLinks(data, { groupByAttack = false } = {}) {
+  const keyOf = groupByAttack
+    ? (src, dst, m, att) => `${src}__${dst}__${m}__${att}`
+    : (src, dst, m) => `${src}__${dst}__${m}`;
   const agg = new Map();
   for (const row of data) {
     const src = row.src_ip, dst = row.dst_ip, m = row.timestamp;
-    const k = keyOf(src, dst, m);
+    const att = (row.attack || 'normal');
+    const k = groupByAttack ? keyOf(src, dst, m, att) : keyOf(src, dst, m);
     let rec = agg.get(k);
     if (!rec) {
-      rec = { source: src, target: dst, minute: m, count: 0, attackCounts: new Map(), attackGroupCounts: new Map() };
+      rec = { source: src, target: dst, minute: m, count: 0, attackCounts: new Map(), attackGroupCounts: new Map(), portCounts: new Map() };
       agg.set(k, rec);
     }
     const c = (row.count || 1);
     rec.count += c;
-    const att = (row.attack || 'normal');
     rec.attackCounts.set(att, (rec.attackCounts.get(att) || 0) + c);
     const attg = (row.attack_group || 'normal');
     rec.attackGroupCounts.set(attg, (rec.attackGroupCounts.get(attg) || 0) + c);
+    const port = row.dst_port || 0;
+    if (port) rec.portCounts.set(port, (rec.portCounts.get(port) || 0) + c);
   }
 
   const links = [];
@@ -77,7 +85,11 @@ export function computeLinks(data) {
     for (const [attg, c] of rec.attackGroupCounts.entries()) {
       if (c > bestGroupCnt) { bestGroupCnt = c; bestGroup = attg; }
     }
-    links.push({ source: rec.source, target: rec.target, minute: rec.minute, count: rec.count, attack: bestAttack, attack_group: bestGroup });
+    let bestPort = 0, bestPortCnt = -1;
+    for (const [p, c] of rec.portCounts.entries()) {
+      if (c > bestPortCnt) { bestPortCnt = c; bestPort = p; }
+    }
+    links.push({ source: rec.source, target: rec.target, minute: rec.minute, count: rec.count, attack: bestAttack, attack_group: bestGroup, dst_port: bestPort });
   }
 
   links.sort((a, b) => (a.minute - b.minute) || (b.count - a.count) || a.source.localeCompare(b.source));
