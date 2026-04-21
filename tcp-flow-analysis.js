@@ -10,7 +10,7 @@ import {
     TCP_STATES, HANDSHAKE_TIMEOUT_MS, REORDER_WINDOW_PKTS, REORDER_WINDOW_MS,
     DEFAULT_FLAG_COLORS, FLAG_CURVATURE, PROTOCOL_MAP,
     DEFAULT_FLOW_COLORS, DEFAULT_EVENT_COLORS,
-    LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT, LOZENGE_MIN_WIDTH, LOZENGE_INDIVIDUAL_HEIGHT, CLOSE_TYPE_STACK_ORDER
+    LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT, LOZENGE_MIN_WIDTH, CLOSE_TYPE_STACK_ORDER
 } from './src/config/constants.js';
 import {
     LOG, formatBytes, formatTimestamp, formatDuration,
@@ -806,12 +806,16 @@ function renderCirclesWithOptions(layer, binned, rScale, transitionOpts) {
     }
 }
 
-// Wrapper to call imported renderLozenges with required options
+// Wrapper to call imported renderLozenges with required options.
 function renderLozengesWithOptions(layer, flowData, transitionOpts) {
     if (!flowData || flowData.length === 0) {
         if (layer) layer.selectAll('.flow-lozenge').remove();
         return;
     }
+
+    const chartContainer = document.getElementById('chart-container');
+    const scrollTop = chartContainer ? chartContainer.scrollTop : 0;
+    const viewportH = chartContainer ? chartContainer.clientHeight : 800;
 
     // Alias flow fields so collapseSubRowsBins can operate on them:
     // it checks d.src_ip for collapse and groups by d.flagType
@@ -840,33 +844,17 @@ function renderLozengesWithOptions(layer, flowData, transitionOpts) {
         for (const [k, v] of Object.entries(flowColors.invalid)) colorMap.set(k, v);
     }
 
-    // Minimap: feed WebGL renderer ALL data so user sees the full IP extent.
-    // Minimap uses its own xScale (full time domain) and fixed viewport.
-    if (canvasRenderer) {
-        try {
-            canvasRenderer.setData(data, colorMap, hScale, {
-                minHeight: LOZENGE_MIN_HEIGHT,
-                maxHeight: LOZENGE_MAX_HEIGHT,
-                individualHeight: LOZENGE_INDIVIDUAL_HEIGHT
-            });
-            const mx = (state.minimap && state.minimap.xScale) || xScale;
-            const mh = (state.minimap && state.minimap.viewportHeight) || 180;
-            const mst = (state.minimap && state.minimap.inner) ? state.minimap.inner.scrollTop : 0;
-            canvasRenderer.render(mx, mst, mh);
-        } catch (e) { console.warn('[Minimap] render failed', e); }
-    }
-
-    // Main SVG view: render all lozenges. state.layout.ipPositions contains
-    // every IP, so no filter is needed — the minimap window is a scroll
-    // indicator, not a data filter.
-    renderLozenges(layer, data, {
+    // When the main WebGL renderer is active, skipSvgRects:true suppresses SVG rect
+    // creation; renderLozenges still computes yPosWithOffset for every item so we
+    // can hand the result to the WebGL renderer.
+    const useMainWebGL = !!mainWebGLRenderer;
+    const processed = renderLozenges(layer, data, {
         xScale,
         hScale,
         flowColorMap: colorMap,
         LOZENGE_MIN_HEIGHT,
         LOZENGE_MAX_HEIGHT,
         LOZENGE_MIN_WIDTH,
-        LOZENGE_INDIVIDUAL_HEIGHT,
         ROW_GAP,
         ipRowHeights: state.layout.ipRowHeights,
         ipPairCounts: state.layout.ipPairCounts,
@@ -882,8 +870,21 @@ function renderLozengesWithOptions(layer, flowData, transitionOpts) {
         separateFlags: state.ui.separateFlags,
         onLozengeHighlight: onCircleHighlight,
         onLozengeClearHighlight: onCircleClearHighlight,
-        transitionOpts
+        transitionOpts,
+        skipSvgRects: useMainWebGL
     });
+
+    // Feed processed items (with yPosWithOffset) to the main WebGL renderer.
+    if (useMainWebGL && processed && processed.length > 0) {
+        try {
+            mainWebGLRenderer.setData(processed, colorMap, hScale, {
+                minHeight: LOZENGE_MIN_HEIGHT,
+                maxHeight: LOZENGE_MAX_HEIGHT
+            });
+            mainWebGLRenderer.render(xScale, scrollTop, viewportH);
+        } catch (e) { console.warn('[MainWebGL] render failed', e); }
+    }
+
 }
 
 // Create tooltip HTML for flow lozenge
@@ -1325,14 +1326,8 @@ function initializeBarVisualization() {
         onToggleClosing: (checked) => { state.ui.showClosing = checked; drawSelectedFlowArcs(); try { applyInvalidReasonFilter(); } catch(e) { logCatchError('applyInvalidReasonFilter', e); } },
         onToggleGroundTruth: (checked) => {
             state.ui.showGroundTruth = checked;
-            if (canvasRenderer) {
-                canvasRenderer.setShowGroundTruth(checked);
-                const container = document.getElementById('chart-container');
-                canvasRenderer.render(xScale, container?.scrollTop || 0, container?.clientHeight || 800);
-            } else {
-                const selectedIPs = Array.from(document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')).map(cb => cb.value);
-                drawGroundTruthBoxes(selectedIPs);
-            }
+            const selectedIPs = Array.from(document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')).map(cb => cb.value);
+            drawGroundTruthBoxes(selectedIPs);
         },
         onToggleSubRowArcs: (checked) => {
             state.ui.showSubRowArcs = checked;
@@ -2783,6 +2778,7 @@ function drawSubRowArcs() {
 
 // Function to draw ground truth event boxes
 function drawGroundTruthBoxes(selectedIPs) {
+    if (!mainGroup) return;
     if (!state.ui.showGroundTruth || !state.flows.groundTruth || state.flows.groundTruth.length === 0) {
         // Remove existing ground truth boxes if not showing
         mainGroup.selectAll('.ground-truth-box').remove();
@@ -4068,6 +4064,7 @@ function handleFileLoad(event) {
 }
 
 function highlight(selected) {
+    if (!svg || !mainGroup) return;
     const hasSelection = selected && (selected.ip || selected.flag);
 
     // Get connected IPs for row highlighting
@@ -5947,11 +5944,6 @@ function init() {
     loadGroundTruthData().then(data => {
         state.flows.groundTruth = data;
 
-        // Feed ground truth to canvas renderer if available
-        if (canvasRenderer && data.length > 0) {
-            canvasRenderer.setGroundTruth(data, eventColors);
-        }
-
         // Update ground truth stats display
         const container = document.getElementById('groundTruthStats');
         if (data.length > 0) {
@@ -6028,7 +6020,7 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
     d3.select("#chart").html("");
     document.getElementById('loadingMessage').style.display = 'none';
 
-    const MAIN_ROW_GAP = ROW_GAP;       // 30 — generous readable rows for SVG main view
+    const ROW_GAP_CRAMPED = 0.1;
     const margin = { top: 80, right: 120, bottom: 50, left: 180 };
     const chartContainerEl = document.getElementById('chart-container');
     width = chartContainerEl.clientWidth - margin.left - margin.right;
@@ -6037,41 +6029,6 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
     const pad = Math.max(1, Math.floor(span * 0.02));
     state.data.timeExtent = [timeExtent[0] - pad, timeExtent[1] + pad];
 
-    // Minimap configuration — sub-pixel rows so all IPs fit compactly. If the
-    // full content exceeds the viewport cap, the minimap scrolls vertically.
-    const MINIMAP_WIDTH = 300;
-    const MINIMAP_PAD = 8;
-    const ROW_GAP_MINI = 0.1;
-    const VIEWPORT_CAP = Math.max(240, Math.min(window.innerHeight - 140, 720));
-
-    const contentHeight = 2 * MINIMAP_PAD + selectedIPs.length * ROW_GAP_MINI;
-    const viewportHeight = Math.min(contentHeight, VIEWPORT_CAP);
-
-    state.minimap = {
-        allIPs: selectedIPs.slice(),
-        minimapIPPositions: new Map(),
-        rowGapMini: ROW_GAP_MINI,
-        viewportHeight,
-        contentHeight,
-        pad: MINIMAP_PAD,
-        container: null,
-        windowEl: null,
-        xScale: null,
-        inner: null,
-        mainRowGap: MAIN_ROW_GAP,
-        mainMargin: margin
-    };
-
-    // Compact IP positions for the minimap (all IPs, tight rows)
-    let ym = MINIMAP_PAD;
-    for (const ip of selectedIPs) {
-        state.minimap.minimapIPPositions.set(ip, ym);
-        ym += ROW_GAP_MINI;
-    }
-
-    // Main SVG layout: EVERY IP is placed at ROW_GAP spacing. No filtering —
-    // the user scrolls the chart container to navigate; the minimap window
-    // reflects the current scroll position.
     state.layout.ipPositions.clear();
     state.layout.ipRowHeights = state.layout.ipRowHeights || new Map();
     state.layout.ipRowHeights.clear();
@@ -6083,9 +6040,9 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
     let y = TOP_PAD;
     for (const ip of selectedIPs) {
         state.layout.ipPositions.set(ip, y);
-        state.layout.ipRowHeights.set(ip, MAIN_ROW_GAP);
+        state.layout.ipRowHeights.set(ip, ROW_GAP_CRAMPED);
         state.layout.ipPairCounts.set(ip, 1);
-        y += MAIN_ROW_GAP;
+        y += ROW_GAP_CRAMPED;
     }
     height = y + TOP_PAD;
     const minY = TOP_PAD;
@@ -6094,11 +6051,18 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
     xScale = d3.scaleLinear().domain(state.data.timeExtent).range([0, width]);
     yScale = d3.scaleLinear().domain([minY, maxY]).range([minY, maxY]);
 
+    // Flow-only mode: create SVG structure so fullDomainLayer/dynamicLayer remain valid
+    // d3 selections (renderLozenges needs a real layer to compute yPosWithOffset, which
+    // is then handed to the WebGL renderer).  The SVG element is immediately removed from
+    // the DOM so the browser renders nothing from it — WebGL is the sole visual renderer.
+    // mainGroup is set to null so every SVG-appending function (drawGroundTruthBoxes,
+    // renderIPRowLabels, drawSelectedFlowArcs, etc.) hits its early-return guard.
     const svgResult = createSVGStructure({
         d3, containerId: '#chart', width, height, margin, dotRadius: 40
     });
-    svg = svgResult.svg;
-    mainGroup = svgResult.mainGroup;
+    svgResult.svg.remove();   // detach from DOM — no paint cost, d3 selections still live
+    svg = null;
+    mainGroup = null;
     fullDomainLayer = svgResult.fullDomainLayer;
     dynamicLayer = svgResult.dynamicLayer;
 
@@ -6176,19 +6140,15 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
             ).map(cb => cb.value)
         });
         zoom = createZoomBehavior({ d3, scaleExtent: [1, 1e9], onZoom: zoomed });
-        zoomTarget = svg;
+        // SVG is removed in flow-only mode; attach zoom to the chart container div instead.
+        zoomTarget = d3.select(chartContainerEl);
         zoomTarget.call(zoom);
     } catch (e) { console.warn('[FlowOnly] Zoom handler init failed', e); }
 
     fullDomainBinsCache = { version: state.data.version, data: [], binSize: null, sorted: false };
 
-    // Build floating compact minimap (WebGL) with scroll-indicator window
-    _buildFlowMinimap(selectedIPs, margin);
-
-    // Sync the minimap window to chart-container's current scroll position.
-    // The window now acts as a scroll indicator over the full IP list.
-    _updateScrollIndicator();
-    chartContainerEl.addEventListener('scroll', _updateScrollIndicator);
+    // Build main chart WebGL renderer (draws lozenges on top of the SVG background)
+    _setupMainWebGLRenderer(margin, ROW_GAP_CRAMPED);
 
     // Kick an initial render if flow data is already available; otherwise the
     // regular data-load pipeline (applyZoomDomain / loadFlowViewData) will
@@ -6201,210 +6161,61 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
 }
 
 /**
- * Build the floating compact minimap + sliding-window overlay.
- * The WebGL renderer (canvasRenderer) is pointed at the minimap container
- * and always draws all IPs in a compact layout. The sliding window selects
- * which IPs the main SVG view renders.
+ * Set up the WebGL renderer for the main chart lozenge layer.
+ * The canvas sits at z-index 0 inside #chart-container, behind the SVG.
+ * All SVG event handlers (zoom, drag-reorder, etc.) remain active because
+ * both WebGL canvases have pointer-events:none.
+ *
+ * NOTE: With skipSvgRects:true passed to renderLozenges, SVG <rect class="flow-lozenge">
+ * elements are NOT created. This means lozenge tooltips and hover strokes are
+ * not available on the main view until a follow-up hit-testing pass is added.
  */
-function _buildFlowMinimap(selectedIPs, mainMargin) {
-    // Remove any prior minimap
-    const prior = document.getElementById('flow-minimap');
-    if (prior && prior.parentElement) prior.parentElement.removeChild(prior);
-
-    const MINIMAP_WIDTH = 300;
-    const VIEW_H = state.minimap.viewportHeight;
-    const CONTENT_H = state.minimap.contentHeight;
-    const PAD = state.minimap.pad;
-    const needsScroll = CONTENT_H > VIEW_H;
-
-    const outerH = VIEW_H + 24; // +24 for title bar
-
-    const container = document.createElement('div');
-    container.id = 'flow-minimap';
-    container.style.cssText = [
-        'position:fixed', 'top:90px', 'right:20px',
-        `width:${MINIMAP_WIDTH}px`, `height:${outerH}px`,
-        'border:1px solid #adb5bd',
-        'background:rgba(255,255,255,0.96)',
-        'box-shadow:0 2px 10px rgba(0,0,0,0.18)',
-        'border-radius:5px', 'z-index:900',
-        'overflow:hidden', 'user-select:none',
-        'font-family:sans-serif'
-    ].join(';');
-
-    const title = document.createElement('div');
-    title.textContent = 'IP Range Minimap — drag title to move';
-    title.style.cssText = 'font-size:10px; padding:4px 8px; color:#495057; background:#f1f3f5; border-bottom:1px solid #dee2e6; cursor:move;';
-    container.appendChild(title);
-
-    // `inner` is the scrollable viewport. When content overflows it scrolls
-    // vertically; the WebGL canvas (appended by WebGLFlowRenderer) is absolute-
-    // positioned inside and follows scrollTop via its own style.top.
-    const inner = document.createElement('div');
-    inner.style.cssText = [
-        'position:relative', 'width:100%',
-        `height:${VIEW_H}px`, 'background:#fafbfc',
-        needsScroll ? 'overflow-y:auto' : 'overflow:hidden',
-        'overflow-x:hidden'
-    ].join(';');
-    container.appendChild(inner);
-    document.body.appendChild(container);
-    state.minimap.container = container;
-    state.minimap.inner = inner;
-
-    // `contentWrap` defines the scrollable height and hosts the sliding window.
-    // Required even when content fits (no perf cost) so the window y is always
-    // in content-space coordinates regardless of scroll position.
-    const contentWrap = document.createElement('div');
-    contentWrap.style.cssText = [
-        'position:relative', 'width:100%',
-        `height:${CONTENT_H}px`
-    ].join(';');
-    inner.appendChild(contentWrap);
-
-    // Sliding window overlay — lives in contentWrap so it scrolls with the IPs.
-    const windowEl = document.createElement('div');
-    windowEl.className = 'flow-minimap-window';
-    windowEl.style.cssText = [
-        'position:absolute', 'left:0', 'right:0',
-        'background:rgba(77,171,247,0.18)',
-        'border-top:2px solid #1971c2',
-        'border-bottom:2px solid #1971c2',
-        'cursor:grab', 'z-index:20',
-        'box-sizing:border-box',
-        'pointer-events:auto'
-    ].join(';');
-    contentWrap.appendChild(windowEl);
-    state.minimap.windowEl = windowEl;
-
-    // Minimap xScale: fixed to full time extent so zooming the main view
-    // doesn't stretch the minimap.
-    state.minimap.xScale = d3.scaleLinear()
-        .domain(state.data.timeExtent)
-        .range([PAD, MINIMAP_WIDTH - PAD]);
-
-    // Initialize WebGL minimap renderer. Pass `inner` as container so the
-    // canvas is absolute-positioned inside the scrollable viewport.
-    try {
-        if (canvasRenderer) canvasRenderer.destroy();
-        const useWebGL = typeof createREGL !== 'undefined';
-        const miniMargin = { top: 0, right: PAD, bottom: 0, left: PAD };
-        const miniChartWidth = MINIMAP_WIDTH - 2 * PAD;
-        canvasRenderer = useWebGL
-            ? new WebGLFlowRenderer(inner, miniMargin, miniChartWidth)
-            : new CanvasFlowRenderer(inner, miniMargin, miniChartWidth);
-        canvasRenderer.setLayout(selectedIPs, state.minimap.minimapIPPositions, state.minimap.rowGapMini);
-        console.log(`[FlowOnly] ${useWebGL ? 'WebGL' : 'Canvas2D'} minimap renderer initialized (${selectedIPs.length} IPs, row=${state.minimap.rowGapMini}px, content=${CONTENT_H.toFixed(0)}px, viewport=${VIEW_H}px, scroll=${needsScroll})`);
-    } catch (e) {
-        console.warn('[FlowOnly] Minimap renderer failed:', e.message);
-        canvasRenderer = null;
+function _setupMainWebGLRenderer(margin, rowGap) {
+    // Tear down any previous instance (e.g. chart re-init)
+    if (mainWebGLRenderer) {
+        try { mainWebGLRenderer.destroy(); } catch (e) {}
+        mainWebGLRenderer = null;
     }
 
-    // Scroll listener: re-render WebGL viewport on minimap scroll
-    if (needsScroll) {
-        inner.addEventListener('scroll', () => {
-            if (canvasRenderer && state.minimap.xScale) {
-                canvasRenderer.render(state.minimap.xScale, inner.scrollTop, VIEW_H);
+    const chartContainerEl = document.getElementById('chart-container');
+    if (!chartContainerEl) return;
+    if (typeof createREGL === 'undefined') {
+        console.warn('[MainWebGL] regl not loaded — main chart will use SVG lozenges');
+        return;
+    }
+
+    try {
+        mainWebGLRenderer = new WebGLFlowRenderer(chartContainerEl, margin, width);
+
+        // Keep WebGL canvases behind the SVG so SVG events (zoom, drag) are unaffected
+        mainWebGLRenderer.canvas.style.zIndex = '0';
+        mainWebGLRenderer.overlayCanvas.style.zIndex = '0';
+        mainWebGLRenderer.canvas.style.pointerEvents = 'none';
+        mainWebGLRenderer.overlayCanvas.style.pointerEvents = 'none';
+
+        mainWebGLRenderer.setLayout(state.layout.ipOrder, state.layout.ipPositions, rowGap ?? ROW_GAP);
+
+        // Re-render on scroll so the WebGL canvas tracks the scrollable SVG viewport.
+        chartContainerEl.addEventListener('scroll', () => {
+            if (!mainWebGLRenderer) return;
+            mainWebGLRenderer.render(xScale, chartContainerEl.scrollTop, chartContainerEl.clientHeight);
+        });
+
+        // Re-render on container resize (e.g. panel open/close)
+        const resizeObs = new ResizeObserver(entries => {
+            if (!mainWebGLRenderer) return;
+            for (const entry of entries) {
+                const newWidth = entry.contentRect.width - margin.left - margin.right;
+                mainWebGLRenderer.resize(newWidth);
+                mainWebGLRenderer.render(xScale, chartContainerEl.scrollTop, chartContainerEl.clientHeight);
             }
         });
-    }
+        resizeObs.observe(chartContainerEl);
 
-    // IP row labels (all IPs — one text node per row)
-    _renderAllIPLabels(mainMargin);
-
-    _updateScrollIndicator();
-
-    // --- Title-bar drag: moves the whole floating minimap container ----------
-    let containerDrag = null;
-    title.addEventListener('mousedown', (e) => {
-        const rect = container.getBoundingClientRect();
-        containerDrag = {
-            offsetX: e.clientX - rect.left,
-            offsetY: e.clientY - rect.top
-        };
-        container.style.right = 'auto';
-        container.style.left = rect.left + 'px';
-        container.style.top = rect.top + 'px';
-        e.preventDefault();
-    });
-    document.addEventListener('mousemove', (e) => {
-        if (!containerDrag) return;
-        const maxX = window.innerWidth - container.offsetWidth;
-        const maxY = window.innerHeight - 30;
-        const newLeft = Math.max(0, Math.min(maxX, e.clientX - containerDrag.offsetX));
-        const newTop = Math.max(0, Math.min(maxY, e.clientY - containerDrag.offsetY));
-        container.style.left = newLeft + 'px';
-        container.style.top = newTop + 'px';
-    });
-    document.addEventListener('mouseup', () => { containerDrag = null; });
-
-    // --- Scroll-indicator drag: window rect scrolls the main chart ----------
-    // Mapping: minimap content coordinates ↔ main-chart scroll coordinates.
-    // 1 px of drag on the minimap = (chart.scrollHeight / minimap.contentHeight)
-    // px of scroll on the main chart.
-    let drag = null;
-    windowEl.addEventListener('mousedown', (e) => {
-        const chartEl = document.getElementById('chart-container');
-        drag = { y: e.clientY, scrollTop: chartEl.scrollTop };
-        windowEl.style.cursor = 'grabbing';
-        e.preventDefault();
-        e.stopPropagation();
-    });
-    document.addEventListener('mousemove', (e) => {
-        if (!drag) return;
-        const chartEl = document.getElementById('chart-container');
-        if (!chartEl) return;
-        const dy = e.clientY - drag.y;
-        const ratio = chartEl.scrollHeight / Math.max(1, state.minimap.contentHeight);
-        chartEl.scrollTop = drag.scrollTop + dy * ratio;
-        // chartEl 'scroll' event triggers _updateScrollIndicator.
-    });
-    document.addEventListener('mouseup', () => {
-        if (drag) { drag = null; windowEl.style.cursor = 'grab'; }
-    });
-
-    // Click on minimap background jumps main-chart scroll to that position
-    contentWrap.addEventListener('click', (e) => {
-        if (e.target === windowEl) return;
-        const chartEl = document.getElementById('chart-container');
-        if (!chartEl) return;
-        const rect = contentWrap.getBoundingClientRect();
-        const clickY = e.clientY - rect.top;
-        const ratio = chartEl.scrollHeight / Math.max(1, state.minimap.contentHeight);
-        const winH = parseFloat(windowEl.style.height) || 24;
-        chartEl.scrollTop = Math.max(0, (clickY - winH / 2) * ratio);
-    });
-}
-
-/**
- * Sync the minimap's sliding-window rectangle to the main chart's scroll
- * position. The rect's size and y-offset reflect what fraction of the full
- * IP list is currently in view.
- */
-function _updateScrollIndicator() {
-    const m = state.minimap;
-    if (!m || !m.windowEl) return;
-    const chartEl = document.getElementById('chart-container');
-    if (!chartEl) return;
-
-    const scrollH = Math.max(1, chartEl.scrollHeight);
-    const clientH = chartEl.clientHeight;
-    const ratio = m.contentHeight / scrollH;
-
-    const top = m.pad + chartEl.scrollTop * ratio;
-    const height = Math.max(20, clientH * ratio);  // ~20px minimum to stay grabbable
-
-    m.windowEl.style.top = top + 'px';
-    m.windowEl.style.height = height + 'px';
-
-    // Auto-scroll the minimap viewport so the window stays visible when the
-    // minimap itself overflows (content > viewport).
-    if (m.inner) {
-        const viewTop = m.inner.scrollTop;
-        const viewBot = viewTop + m.viewportHeight;
-        const winBot = top + height;
-        if (top < viewTop) m.inner.scrollTop = Math.max(0, top - 10);
-        else if (winBot > viewBot) m.inner.scrollTop = Math.max(0, winBot - m.viewportHeight + 10);
+        console.log('[MainWebGL] WebGL renderer initialized for main chart');
+    } catch (e) {
+        console.warn('[MainWebGL] Failed to initialize main chart WebGL renderer:', e.message);
+        mainWebGLRenderer = null;
     }
 }
 
@@ -6637,8 +6448,8 @@ let adaptiveOverviewLoader = null;
 // Semantic zoom manager for flow view clustering
 let flowZoomManager = null;
 
-// Canvas renderer for flow lozenges + IP labels (replaces SVG for performance with many IPs)
-let canvasRenderer = null;
+// WebGL renderer for the main chart lozenges
+let mainWebGLRenderer = null;
 
 /**
  * Handle flow data loaded event

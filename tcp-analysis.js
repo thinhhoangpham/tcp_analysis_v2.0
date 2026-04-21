@@ -9,7 +9,8 @@ import {
     SUB_ROW_HEIGHT, SUB_ROW_GAP,
     TCP_STATES, HANDSHAKE_TIMEOUT_MS, REORDER_WINDOW_PKTS, REORDER_WINDOW_MS,
     DEFAULT_FLAG_COLORS, FLAG_CURVATURE, PROTOCOL_MAP,
-    DEFAULT_FLOW_COLORS, DEFAULT_EVENT_COLORS
+    DEFAULT_FLOW_COLORS, DEFAULT_EVENT_COLORS,
+    LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT, LOZENGE_MIN_WIDTH, CLOSE_TYPE_STACK_ORDER
 } from './src/config/constants.js';
 import {
     LOG, formatBytes, formatTimestamp, formatDuration,
@@ -25,10 +26,9 @@ import {
 } from './src/tcp/flags.js';
 import { getVisiblePackets, computeBarWidthPx } from './src/data/binning.js';
 import { AdaptiveOverviewLoader } from './src/data/adaptive-overview-loader.js';
+import { FlowZoomManager } from './src/data/flow-zoom-manager.js';
 import {
     computeTimeArcsRange,
-    createSyntheticFlowsFromChunks,
-    logSyntheticFlowRange,
     initializeAdaptiveLoader,
     updateFlowDataUI,
     calculateChartDimensions
@@ -41,6 +41,7 @@ import {
     exportFlowToCSV as exportFlowToCSVFromModule
 } from './src/data/flowReconstruction.js';
 import { renderCircles } from './src/rendering/circles.js';
+import { renderLozenges } from './src/rendering/lozenges.js';
 import { createTooltipHTML } from './src/rendering/tooltip.js';
 import { arcPathGenerator } from './src/rendering/arcPath.js';
 import { createZoomBehavior, applyZoomDomain as applyZoomDomainFromModule } from './src/interaction/zoom.js';
@@ -79,6 +80,7 @@ import {
 } from './src/rendering/svgSetup.js';
 import {
     prepareInitialRenderData,
+    prepareFlowRenderData,
     performInitialRender,
     createRadiusScale
 } from './src/rendering/initialRender.js';
@@ -317,6 +319,15 @@ const state = {
         scope: 'selected',        // 'selected' | 'all'
         filterActive: false,      // When true, dim non-matching circles
         newlyAddedIPs: new Set()  // IPs added by "Select IPs" (gold-highlighted until cleared)
+    },
+
+    // Flow View mode data
+    flowView: {
+        binnedData: [],           // processed binned flow lozenges ready for rendering
+        individualData: [],       // individual flow objects (Tier 2)
+        resolution: null,         // current resolution level
+        globalMaxCount: 1,        // max count across all bins (for hScale)
+        tier: 'binned'            // 'binned' | 'individual'
     }
 };
 
@@ -362,13 +373,16 @@ function collapseSubRowsBins(binned, collapsedIPs) {
     }
     if (merge.length === 0) return binned;
 
-    // Group by (time | yPos | flagType)
+    // Group by (src_ip | time | yPos | flagType)
+    // src_ip is included to prevent merging items from different collapsed IPs
+    // (flow bin items lack yPos until renderLozenges computes it, causing
+    //  items from unrelated IPs to collide on the same merge key)
     const groups = new Map();
     for (const d of merge) {
         const t = Number.isFinite(d.binCenter) ? Math.floor(d.binCenter)
             : (Number.isFinite(d.binTimestamp) ? Math.floor(d.binTimestamp) : Math.floor(d.timestamp));
         const ft = d.flagType || 'OTHER';
-        const key = `${t}|${d.yPos}|${ft}`;
+        const key = `${d.src_ip}|${t}|${d.yPos}|${ft}`;
         let g = groups.get(key);
         if (!g) {
             g = {
@@ -790,8 +804,247 @@ function renderCirclesWithOptions(layer, binned, rScale, transitionOpts) {
     }
 }
 
+// Wrapper to call imported renderLozenges with required options
+function renderLozengesWithOptions(layer, flowData, transitionOpts) {
+    if (!flowData || flowData.length === 0) {
+        if (layer) layer.selectAll('.flow-lozenge').remove();
+        return;
+    }
+
+    // Alias flow fields so collapseSubRowsBins can operate on them:
+    // it checks d.src_ip for collapse and groups by d.flagType
+    const aliased = flowData.map(d => ({
+        ...d,
+        src_ip: d.initiator,
+        dst_ip: d.responder,
+        flagType: d.closeType
+    }));
+    const data = collapseSubRowsBins(aliased, state.layout.collapsedIPs);
+
+    const maxCount = state.flowView.globalMaxCount || 1;
+    const hScale = d3.scaleSqrt()
+        .domain([1, Math.max(1, maxCount)])
+        .range([LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT]);
+
+    // Build flowColorMap from the loaded flowColors object
+    const colorMap = new Map();
+    if (flowColors.closing) {
+        for (const [k, v] of Object.entries(flowColors.closing)) colorMap.set(k, v);
+    }
+    if (flowColors.ongoing) {
+        for (const [k, v] of Object.entries(flowColors.ongoing)) colorMap.set(k, v);
+    }
+    if (flowColors.invalid) {
+        for (const [k, v] of Object.entries(flowColors.invalid)) colorMap.set(k, v);
+    }
+
+    renderLozenges(layer, data, {
+        xScale,
+        hScale,
+        flowColorMap: colorMap,
+        LOZENGE_MIN_HEIGHT,
+        LOZENGE_MAX_HEIGHT,
+        LOZENGE_MIN_WIDTH,
+        ROW_GAP,
+        ipRowHeights: state.layout.ipRowHeights,
+        ipPairCounts: state.layout.ipPairCounts,
+        stableIpPairOrderByRow: state.layout.ipPairOrderByRow,
+        subRowHeights: state.layout.subRowHeights,
+        subRowOffsets: state.layout.subRowOffsets,
+        mainGroup,
+        findIPPosition,
+        ipPositions: state.layout.ipPositions,
+        createTooltipHTML: createFlowLozengeTooltipHTML,
+        d3,
+        CLOSE_TYPE_STACK_ORDER,
+        separateFlags: state.ui.separateFlags,
+        onLozengeHighlight: onCircleHighlight,
+        onLozengeClearHighlight: onCircleClearHighlight,
+        transitionOpts
+    });
+}
+
+// Create tooltip HTML for flow lozenge
+function createFlowLozengeTooltipHTML(d) {
+    const closeType = d.closeType || 'unknown';
+    const count = d.count || 1;
+    const lines = [`<strong>${closeType}</strong>`];
+    if (d.clustered && count > 1) {
+        lines.push(`${count} flows clustered`);
+    } else if (d.binned && count > 1) {
+        lines.push(`Count: ${count} flows`);
+    }
+    if (d.initiator) lines.push(`From: ${d.initiator}`);
+    if (d.responder) lines.push(`To: ${d.responder}`);
+    if (d.binStart && d.binEnd) {
+        lines.push(`Time: ${formatTimestamp(d.binStart).utcTime} — ${formatTimestamp(d.binEnd).utcTime}`);
+    } else if (d.startTime) {
+        lines.push(`Start: ${formatTimestamp(d.startTime).utcTime}`);
+        if (d.endTime && d.endTime !== d.startTime) {
+            lines.push(`End: ${formatTimestamp(d.endTime).utcTime}`);
+            lines.push(`Duration: ${formatDuration(d.endTime - d.startTime)}`);
+        }
+    }
+    if (d.totalPackets) lines.push(`Packets: ${d.totalPackets}`);
+    return lines.join('<br>');
+}
+
+// Load flow bin data from AdaptiveOverviewLoader for the flow lozenge view
+async function loadFlowViewData() {
+    if (!adaptiveOverviewLoader || !adaptiveOverviewLoader.index) {
+        console.warn('[FlowView] No adaptive overview loader available');
+        state.flowView.binnedData = [];
+        return;
+    }
+
+    const selectedIPs = Array.from(
+        document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')
+    ).map(cb => cb.value);
+
+    if (selectedIPs.length < 2) {
+        state.flowView.binnedData = [];
+        state.flowView.globalMaxCount = 1;
+        return;
+    }
+
+    const timeExtent = state.data.timeExtent;
+    if (!timeExtent || timeExtent[0] >= timeExtent[1]) {
+        state.flowView.binnedData = [];
+        return;
+    }
+
+    try {
+        const result = await adaptiveOverviewLoader.getFlowBinsByPair(
+            selectedIPs, timeExtent[0], timeExtent[1]
+        );
+        state.flowView.binnedData = result.items;
+        state.flowView.globalMaxCount = result.globalMaxCount;
+        state.flowView.resolution = result.resolution;
+        state.flowView.tier = 'binned';
+        if (flowZoomManager) flowZoomManager.invalidateCache();
+        console.log(`[FlowView] Loaded ${result.items.length} flow bin items at ${result.resolution} resolution`);
+    } catch (err) {
+        console.error('[FlowView] Failed to load flow bin data:', err);
+        state.flowView.binnedData = [];
+    }
+}
+
+// Callback for FlowZoomManager: re-render after individual flow CSVs finish loading.
+// Triggers a programmatic zoom to the current domain, which re-enters the zoom handler
+// and runs through the full pipeline (render + row filter + indicator update).
+function _onFlowZoomDataLoaded(result) {
+    if (state.ui.renderMode !== 'flows') return;
+    state.flowView.binnedData = result.items;
+    state.flowView.globalMaxCount = result.globalMaxCount;
+    state.flowView.resolution = result.resolution;
+    state.flowView.tier = result.tier;
+    // Nudge the zoom handler by re-applying the current domain
+    if (typeof applyZoomDomain === 'function') {
+        try {
+            const xDomain = window.__arc_x_domain__;
+            if (xDomain) applyZoomDomain(xDomain, 'program');
+        } catch (e) { console.warn('[FlowView] Re-zoom after load failed:', e); }
+    }
+}
+
+// Handle switching between Packets and Flows view modes
+async function switchViewMode(mode) {
+    if (mode === state.ui.renderMode) return;
+    state.ui.renderMode = mode;
+    console.log(`[ViewMode] Switching to ${mode}`);
+
+    if (mode === 'flows') {
+        // Clear circle and bar elements from packet view
+        if (fullDomainLayer) {
+            fullDomainLayer.selectAll('.direction-dot').remove();
+            fullDomainLayer.selectAll('.bin-bar-segment').remove();
+            fullDomainLayer.selectAll('.bin-stack').remove();
+        }
+        if (dynamicLayer) {
+            dynamicLayer.selectAll('.direction-dot').remove();
+            dynamicLayer.selectAll('.bin-bar-segment').remove();
+            dynamicLayer.selectAll('.bin-stack').remove();
+        }
+        // Trigger zoom handler — FlowZoomManager handles all data loading
+        const xDomain = window.__arc_x_domain__;
+        if (flowZoomManager && xDomain) {
+            applyZoomDomain(xDomain, 'program');
+        } else {
+            // Fallback: load binned data for initial render
+            await loadFlowViewData();
+            renderMarksForLayerLocal(fullDomainLayer, null, null);
+        }
+    } else {
+        // Clear lozenge elements
+        if (fullDomainLayer) fullDomainLayer.selectAll('.flow-lozenge').remove();
+        if (dynamicLayer) dynamicLayer.selectAll('.flow-lozenge').remove();
+        // Flow mode's zoom handler flipped fullDomainLayer to display:none and
+        // made dynamicLayer the visible one. Reverse that so packet circles show.
+        if (fullDomainLayer) fullDomainLayer.style('display', null);
+        if (dynamicLayer) dynamicLayer.style('display', 'none');
+        // Re-render circles into fullDomainLayer from cached bins. This is
+        // required because switching TO flow mode physically .remove()'d the
+        // circles from both layers, so the cache is live but the DOM is empty.
+        if (fullDomainBinsCache && fullDomainBinsCache.data && fullDomainBinsCache.data.length > 0) {
+            const rScale = d3.scaleSqrt()
+                .domain([1, Math.max(1, globalMaxBinCount)])
+                .range([RADIUS_MIN, RADIUS_MAX]);
+            renderMarksForLayerLocal(fullDomainLayer, fullDomainBinsCache.data, rScale);
+        }
+        // Re-apply the current zoom domain so that if the user was zoomed in,
+        // the zoom handler's debounced path rebins and renders into dynamicLayer.
+        // At full domain it hits the early-return path and keeps fullDomainLayer visible.
+        const xDomain = window.__arc_x_domain__;
+        if (xDomain) {
+            applyZoomDomain(xDomain, 'program');
+        }
+    }
+
+    // Toggle visibility of packet-specific controls
+    const packetOnlyControls = document.querySelectorAll('#showSubRowArcs, #showFlowThreading');
+    packetOnlyControls.forEach(el => {
+        const label = el.closest('label');
+        if (label) label.style.display = mode === 'flows' ? 'none' : '';
+    });
+
+
+    // Swap flag legend for flow close-type legend (or vice versa)
+    const flagStatsEl = document.getElementById('flagStats');
+    const sizeLegendEl = document.getElementById('sizeLegend');
+    if (mode === 'flows') {
+        // Replace flag legend with flow close-type legend
+        if (flagStatsEl) {
+            flagStatsEl.setAttribute('data-original-label', flagStatsEl.previousElementSibling?.textContent || '');
+            const label = flagStatsEl.previousElementSibling;
+            if (label && label.tagName === 'LABEL') label.textContent = 'Flow Types';
+            flagStatsEl.innerHTML = buildFlowTypeLegendHTML();
+        }
+        if (sizeLegendEl) {
+            sizeLegendEl.previousElementSibling.textContent = 'Flow Count';
+            sizeLegendEl.innerHTML = '<div style="color: #666; font-size: 11px;">Lozenge height = flow count</div>';
+        }
+    } else {
+        // Restore original flag legend
+        if (flagStatsEl) {
+            const label = flagStatsEl.previousElementSibling;
+            if (label && label.tagName === 'LABEL') label.textContent = flagStatsEl.getAttribute('data-original-label') || 'TCP Flags';
+            // Trigger re-render of flag stats
+            if (typeof updateFlagStats === 'function' && state.data.filtered.length > 0) {
+                updateFlagStats(state.data.filtered);
+            }
+        }
+        if (sizeLegendEl) {
+            sizeLegendEl.previousElementSibling.textContent = 'Packet Count';
+            drawSizeLegend();
+        }
+    }
+}
+
 // Unified render function
 function renderMarksForLayerLocal(layer, data, rScale, transitionOpts) {
+    if (state.ui.renderMode === 'flows') {
+        return renderLozengesWithOptions(layer, state.flowView.binnedData, transitionOpts);
+    }
     return renderCirclesWithOptions(layer, data, rScale, transitionOpts);
 }
 
@@ -802,6 +1055,47 @@ function drawSizeLegend() {
 
 // Flag color legend moved to control panel; no-op here to keep call sites intact
 function drawFlagLegend() {}
+
+// Build HTML for flow close-type legend (used when in Flows view mode)
+function buildFlowTypeLegendHTML() {
+    // Build color map from flowColors
+    const entries = [];
+    if (flowColors.closing) {
+        for (const [name, color] of Object.entries(flowColors.closing)) {
+            entries.push({ name, color, category: 'Closing' });
+        }
+    }
+    if (flowColors.ongoing) {
+        for (const [name, color] of Object.entries(flowColors.ongoing)) {
+            entries.push({ name, color, category: 'Ongoing' });
+        }
+    }
+    if (flowColors.invalid) {
+        for (const [name, color] of Object.entries(flowColors.invalid)) {
+            entries.push({ name, color, category: 'Invalid' });
+        }
+    }
+
+    if (entries.length === 0) {
+        return '<div style="color: #666;">No flow colors loaded</div>';
+    }
+
+    let html = '';
+    let lastCategory = '';
+    for (const { name, color, category } of entries) {
+        if (category !== lastCategory) {
+            if (lastCategory) html += '<div style="margin-top: 4px;"></div>';
+            html += `<div style="font-size: 10px; color: #999; margin-bottom: 2px;">${category}</div>`;
+            lastCategory = category;
+        }
+        const displayName = name.replace(/_/g, ' ');
+        html += `<div style="display: flex; align-items: center; margin-bottom: 2px;">
+            <span style="display: inline-block; width: 14px; height: 8px; border-radius: 4px; background: ${color}; margin-right: 6px; flex-shrink: 0;"></span>
+            <span style="font-size: 11px;">${displayName}</span>
+        </div>`;
+    }
+    return html;
+}
 
 // TCP flag colors, now loaded from flag_colors.json with defaults
 let flagColors = { ...DEFAULT_FLAG_COLORS };
@@ -1042,7 +1336,8 @@ function initializeBarVisualization() {
             } catch (e) {
                 console.warn('Error updating visualization after binning toggle:', e);
             }
-        }
+        },
+        onViewModeChange: (mode) => switchViewMode(mode)
     });
 
     // Window resize handler for responsive visualization
@@ -2634,7 +2929,16 @@ async function updateIPFilter({ fromSearch = false } = {}) {
     if (!fromSearch && state.search.newlyAddedIPs.size > 0) {
         state.search.newlyAddedIPs.clear();
     }
-    return getIPFilterController().updateIPFilter();
+    await getIPFilterController().updateIPFilter();
+
+    // If in flow view mode, re-trigger zoom handler (FlowZoomManager handles data)
+    if (state.ui.renderMode === 'flows') {
+        if (flowZoomManager) flowZoomManager.invalidateCache();
+        const xDomain = window.__arc_x_domain__;
+        if (flowZoomManager && xDomain) {
+            applyZoomDomain(xDomain, 'program');
+        }
+    }
 }
 
 // Delegated to control-panel.js
@@ -3839,104 +4143,6 @@ function zoomToFlow(flow) {
 }
 
 /**
- * Load flow detail via fetch API (used when File System API is not available)
- * @param {Object} flowSummary - Flow summary with id, startTime
- * @param {Object} state - flowDataState with basePath and chunksMeta
- * @returns {Promise<Object|null>} Flow object with phases or null
- */
-async function loadFlowDetailViaFetch(flowSummary, state) {
-    const { basePath, chunksMeta, format, getChunkPath } = state;
-    const flowId = flowSummary.id;
-    const flowStartTime = flowSummary.startTime;
-    const { initiator, responder, initiatorPort, responderPort } = flowSummary;
-
-    console.log(`[FlowDetail-Fetch] ========================================`);
-    console.log(`[FlowDetail-Fetch] Loading flow ${flowId} via fetch`);
-    console.log(`[FlowDetail-Fetch] flowStartTime: ${flowStartTime}`);
-    console.log(`[FlowDetail-Fetch] basePath: ${basePath}`);
-    console.log(`[FlowDetail-Fetch] format: ${format}`);
-    console.log(`[FlowDetail-Fetch] chunksMeta count: ${chunksMeta ? chunksMeta.length : 'null'}`);
-    console.log(`[FlowDetail-Fetch] Connection: ${initiator}:${initiatorPort} ↔ ${responder}:${responderPort}`);
-
-    // Find ALL chunks that could contain this flow (by time range AND IPs)
-    // Note: Flow IDs do NOT map to chunk indices - chunks are organized by time, not ID
-    const candidateChunks = [];
-    for (const chunk of chunksMeta) {
-        // Check time range - flow startTime should be within chunk's time range
-        if (chunk.start <= flowStartTime && flowStartTime <= chunk.end) {
-            // Also check if chunk contains both initiator and responder IPs
-            const chunkIPs = chunk.ips || [];
-            const hasInitiator = chunkIPs.includes(initiator);
-            const hasResponder = chunkIPs.includes(responder);
-
-            if (hasInitiator && hasResponder) {
-                candidateChunks.push(chunk);
-            }
-        }
-    }
-
-    console.log(`[FlowDetail-Fetch] Found ${candidateChunks.length} candidate chunks`);
-
-    if (candidateChunks.length === 0) {
-        console.error(`Unable to find chunk for flow ${flowId} (${initiator} ↔ ${responder} @ ${flowStartTime})`);
-        return null;
-    }
-
-    // Search through all candidate chunks until we find the flow
-    for (const chunk of candidateChunks) {
-        try {
-            // Construct chunk path based on format
-            let chunkPath;
-            if (getChunkPath) {
-                chunkPath = getChunkPath(chunk);
-            } else if (format === 'chunked_flows_by_ip_pair' && chunk.folder) {
-                chunkPath = `${basePath}/flows/by_pair/${chunk.folder}/${chunk.file}`;
-            } else {
-                chunkPath = `${basePath}/flows/${chunk.file}`;
-            }
-            console.log(`[FlowDetail-Fetch] Searching chunk ${chunk.file} at ${chunkPath}...`);
-            const response = await fetch(chunkPath);
-            if (!response.ok) {
-                console.warn(`[FlowDetail-Fetch] Failed to load ${chunkPath}: HTTP ${response.status}`);
-                continue;
-            }
-            const flows = await response.json();
-
-            // Try to find by ID first
-            let flow = flows.find(f => f.id === flowId);
-
-            // If not found by ID, try matching by connection tuple + startTime
-            if (!flow) {
-                flow = flows.find(f =>
-                    f.initiator === initiator &&
-                    f.responder === responder &&
-                    f.initiatorPort === initiatorPort &&
-                    f.responderPort === responderPort &&
-                    Math.abs(f.startTime - flowStartTime) < 1000 // Within 1ms
-                );
-            }
-
-            if (flow) {
-                const packetCount = countFlowPacketsLocal(flow);
-                console.log(`[FlowDetail-Fetch] ✅ Found flow ${flowId} in ${chunk.file} with ${packetCount} packets`);
-                console.log(`[FlowDetail-Fetch] Flow has phases:`, flow.phases ? Object.keys(flow.phases) : 'none');
-                console.log(`[FlowDetail-Fetch] ========================================`);
-                return flow;
-            }
-            console.log(`[FlowDetail-Fetch] Flow not in ${chunkPath}, continuing search...`);
-        } catch (err) {
-            console.warn(`[FlowDetail-Fetch] Error searching ${chunkPath}:`, err);
-            // Continue to next chunk
-        }
-    }
-
-    // Flow not found in any candidate chunk
-    console.error(`[FlowDetail-Fetch] ❌ Flow ${flowId} not found in any of ${candidateChunks.length} candidate chunks`);
-    console.log(`[FlowDetail-Fetch] ========================================`);
-    return null;
-}
-
-/**
  * Extract packets from a flow's phases into a flat array (local version)
  * @param {Object} flow - Flow object with phases
  * @returns {Array} Array of packet objects
@@ -4028,12 +4234,6 @@ async function enterFlowDetailMode(flowSummary) {
             }
         }
 
-        // Fallback to fetch API using flowDataState
-        if (!fullFlow && flowDataState && flowDataState.basePath && flowDataState.chunksMeta) {
-            console.log('[FlowDetail] Using fetch API to load flow detail');
-            fullFlow = await loadFlowDetailViaFetch(flowSummary, flowDataState);
-        }
-
         if (!fullFlow) {
             console.error('[FlowDetail] Failed to load flow detail - no loader available');
             hideFlowDetailLoading(loadingIndicator);
@@ -4102,9 +4302,8 @@ function exitFlowDetailMode() {
         }
 
         // Check if we're in flow mode (folder-based data) or packet mode (CSV data)
-        if (flowDataState && (flowDataState.format === 'chunked_flows' || flowDataState.format === 'chunked_flows_by_ip_pair')) {
+        if (flowDataState && flowDataState.format === 'flow_list_csv') {
             // Flow mode: call updateIPFilter to refresh the flow visualization
-            // This will re-render the overview chart and flow bars
             console.log('[FlowDetail] Restoring flow mode visualization');
             updateIPFilter().catch(err => {
                 console.error('[FlowDetail] Error restoring flow view:', err);
@@ -4184,6 +4383,36 @@ function renderFlowDetailView(flow, packets) {
     drawFlowDetailArcs(fdLineGroup, 'flow-detail-arc', preparedPackets,
         p => xScale(p.timestamp),
         p => p.yPos || getIPYWithSubRowOffset(p.src_ip, p.src_ip, p.dst_ip));
+
+    // For single-packet flows, draw an S-curve from source IP to destination IP
+    if (preparedPackets.length === 1) {
+        const p = preparedPackets[0];
+        const px = xScale(p.timestamp);
+        const srcY = p.yPos || getIPYWithSubRowOffset(p.src_ip, p.src_ip, p.dst_ip);
+        const dstY = getIPYWithSubRowOffset(p.dst_ip, p.src_ip, p.dst_ip);
+        if (srcY != null && dstY != null && Math.abs(dstY - srcY) > 1) {
+            const ft = p.flagType || classifyFlags(p.flags) || 'OTHER';
+            const color = flagColors[ft] || flagColors['OTHER'] || '#999';
+            const trailEndX = px + 40;
+            const midX = (px + trailEndX) / 2;
+            fdLineGroup.append('path')
+                .attr('class', 'flow-detail-arc')
+                .attr('d', `M${px},${srcY} C${midX},${srcY} ${midX},${dstY} ${trailEndX},${dstY}`)
+                .attr('fill', 'none')
+                .attr('stroke', color)
+                .attr('stroke-width', 1.5)
+                .attr('stroke-opacity', 0.6);
+            const arrowLen = 5, arrowHalfW = 3;
+            const a = Math.atan2(2 * (dstY - srcY), trailEndX - px);
+            const ca = Math.cos(a), sa = Math.sin(a);
+            const mx = midX, my = (srcY + dstY) / 2;
+            fdLineGroup.append('polygon')
+                .attr('class', 'flow-detail-arc')
+                .attr('points', `${mx+arrowLen*ca},${my+arrowLen*sa} ${mx-arrowLen*ca+arrowHalfW*sa},${my-arrowLen*sa-arrowHalfW*ca} ${mx-arrowLen*ca-arrowHalfW*sa},${my-arrowLen*sa+arrowHalfW*ca}`)
+                .attr('fill', color)
+                .attr('fill-opacity', 0.8);
+        }
+    }
 
     // Update x-axis with zoom-adaptive formatting
     if (bottomOverlayAxisGroup && state.data.timeExtent) {
@@ -4378,7 +4607,7 @@ function drawAutoFlowThreading(packets) {
     mainGroup.selectAll('.flow-threading-arc').remove();
     mainGroup.selectAll('.flow-threading-arcs').remove();
 
-    if (!packets || packets.length < 2) return;
+    if (!packets || packets.length === 0) return;
 
     // Group packets by connection key (4-tuple: src_ip, src_port, dst_ip, dst_port)
     const flowGroups = new Map();
@@ -4957,7 +5186,11 @@ function visualizeTimeArcs(packets) {
         clearAutoFlowThreading,
         logCatchError,
         applyIPRowFilter: (visiblePackets) => applyIPRowFilter(visiblePackets),
-        restoreBaseRows: () => restoreBaseRows()
+        restoreBaseRows: () => restoreBaseRows(),
+        getFlowZoomManager: () => flowZoomManager,
+        getSelectedIPs: () => Array.from(
+            document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')
+        ).map(cb => cb.value)
     });
 
     // 15. Initialize zoom behavior
@@ -5721,6 +5954,9 @@ let flowDataState = null;
 // Adaptive overview loader for multi-resolution flow bins
 let adaptiveOverviewLoader = null;
 
+// Semantic zoom manager for flow view clustering
+let flowZoomManager = null;
+
 /**
  * Handle flow data loaded event
  * This supplements existing packet data without resetting the visualization
@@ -5740,11 +5976,8 @@ async function handleFlowDataLoaded(event) {
             stateTimearcs: state.timearcs
         });
 
-        // Dispatch to format-specific handler
-        if ((format === 'chunked_flows' || format === 'chunked_flows_by_ip_pair') && detail.chunksMeta) {
-            await handleChunkedFlowsFormat(detail, manifest, totalFlows, flowTimeExtent, format);
-        } else if (format === 'chunked_flows' && detail.flows) {
-            handleLegacyFlowsFormat(detail, manifest, flowTimeExtent);
+        if (format === 'flow_list_csv') {
+            handleFlowListFormat(detail, manifest, totalFlows, flowTimeExtent);
         } else {
             handleMultiresFlowsFormat(detail, manifest, totalFlows, flowTimeExtent);
         }
@@ -5756,100 +5989,27 @@ async function handleFlowDataLoaded(event) {
 }
 
 /**
- * Handle chunked flows format (v2/v3) with chunk metadata
- * @param {Object} detail - Event detail object
- * @param {Object} manifest - Data manifest
- * @param {number} totalFlows - Total flow count
- * @param {Array} flowTimeExtent - Time extent [min, max]
- * @param {string} format - Format string
+ * Handle flow_list_csv format. AdaptiveOverviewLoader, FlowListLoader and
+ * FlowZoomManager are already initialized by loadFlowsFromPath — this handler
+ * just stores flowDataState and applies any pending brush pre-filter.
  */
-async function handleChunkedFlowsFormat(detail, manifest, totalFlows, flowTimeExtent, format) {
-    const chunksMeta = detail.chunksMeta;
-    const loadChunksForTimeRange = detail.loadChunksForTimeRange;
-
-    console.log(`[FlowData] Received metadata for ${chunksMeta.length} chunks, ${totalFlows} total flows`);
-
-    // Create synthetic flows from chunk metadata for overview binning
-    const syntheticFlows = createSyntheticFlowsFromChunks(chunksMeta);
-    logSyntheticFlowRange(syntheticFlows, flowTimeExtent, state.timearcs.overviewTimeExtent);
-
-    // Store synthetic flows for the overview chart
-    state.flows.tcp = syntheticFlows;
-    state.flows.current = syntheticFlows;
-
-    // Initialize adaptive loader or fall back to single-resolution
+function handleFlowListFormat(detail, manifest, totalFlows, flowTimeExtent) {
     const basePath = detail.basePath || 'packets_data/attack_flows_day1to5';
-    const effectiveExtent = state.timearcs.overviewTimeExtent || flowTimeExtent;
 
-    const { loader, initialized } = await initializeAdaptiveLoader({
-        basePath,
-        AdaptiveOverviewLoaderClass: AdaptiveOverviewLoader,
-        currentLoader: adaptiveOverviewLoader,
-        effectiveExtent
-    });
-
-    if (initialized && loader) {
-        adaptiveOverviewLoader = loader;
-    }
-
-    const hasAdaptiveOverview = initialized;
-
-    if (!hasAdaptiveOverview) {
-        console.warn('[FlowData] Multi-resolution index not found - overview chart will use chunk loading');
-    }
-
-    // Try to load flow_list.json for flow list popup (lighter alternative to chunks)
-    const hasFlowList = await tryLoadFlowList(basePath);
-    if (hasFlowList) {
-        console.log('[FlowData] flow_list.json loaded - flow list popup will use summary data');
-    }
-
-    // Store flow state for on-demand loading
     flowDataState = {
-        chunksMeta,
-        pairsMeta: detail.pairsMeta,
         manifest,
         totalFlows,
         timeExtent: flowTimeExtent,
-        format,
-        loadChunksForTimeRange,
-        getChunkPath: detail.getChunkPath,
+        format: 'flow_list_csv',
         basePath,
-        hasAdaptiveOverview,
-        hasFlowList
+        hasAdaptiveOverview: !!(adaptiveOverviewLoader && adaptiveOverviewLoader.index),
+        hasFlowList: getFlowListLoader().isLoaded()
     };
 
-    // Update UI
-    updateFlowDataUI({ totalFlows, chunkCount: chunksMeta.length, format: 'chunked' });
+    updateFlowDataUI({ totalFlows, format: 'flow_list_csv' });
 
-    // Defer overview chart creation to after IP selection
-    console.log('[FlowData] Flow data loaded, deferring overview chart creation to after IP selection');
-    console.log('[FlowData] Applying TimeArcs brush selection pre-filter...');
+    console.log('[FlowData] Flow data loaded, applying TimeArcs brush selection pre-filter...');
     applyBrushSelectionPrefilter();
-}
-
-/**
- * Handle legacy flows format (direct flow objects)
- * @param {Object} detail - Event detail object
- * @param {Object} manifest - Data manifest
- * @param {Array} flowTimeExtent - Time extent [min, max]
- */
-function handleLegacyFlowsFormat(detail, manifest, flowTimeExtent) {
-    const flows = detail.flows;
-    state.flows.tcp = flows;
-    state.flows.current = flows;
-
-    flowDataState = {
-        flows,
-        manifest,
-        totalFlows: flows.length,
-        timeExtent: flowTimeExtent,
-        format: 'chunked_flows'
-    };
-
-    const { width, margins } = calculateChartDimensions();
-    const effectiveExtent = state.timearcs.overviewTimeExtent || flowTimeExtent;
-    createOverviewChart([], { timeExtent: effectiveExtent, width, margins });
 }
 
 /**
@@ -6719,8 +6879,8 @@ async function loadFromPath(basePath = DEFAULT_DATA_PATH) {
 }
 
 /**
- * Load flow data from a path using fetch (for default/auto-loading)
- * Supports both chunked_flows (v2) and chunked_flows_by_ip_pair (v3) formats
+ * Load flow data from a path using fetch (for default/auto-loading).
+ * Only flow_list_csv format is supported.
  * @param {string} basePath - Path to the flow data folder
  */
 async function loadFlowsFromPath(basePath = DEFAULT_FLOW_DATA_PATH) {
@@ -6736,65 +6896,20 @@ async function loadFlowsFromPath(basePath = DEFAULT_FLOW_DATA_PATH) {
         console.log('[loadFlowsFromPath] Loaded manifest:', manifest);
 
         const format = manifest.format;
-        let chunksMeta = [];
-        let pairsMeta = null;
-        let getChunkPath;
-
-        if (format === 'chunked_flows_by_ip_pair') {
-            // v3 format: flows organized by IP pair
-            console.log('[loadFlowsFromPath] Using chunked_flows_by_ip_pair format');
-
-            const pairsMetaResponse = await fetch(`${basePath}/flows/pairs_meta.json`);
-            if (!pairsMetaResponse.ok) {
-                throw new Error(`Failed to load pairs_meta.json: ${pairsMetaResponse.status}`);
-            }
-            pairsMeta = await pairsMetaResponse.json();
-            console.log(`[loadFlowsFromPath] Loaded metadata for ${pairsMeta.length} IP pairs`);
-
-            // Flatten all chunks from all pairs into a single array with folder info
-            for (const pair of pairsMeta) {
-                for (const chunk of pair.chunks) {
-                    chunksMeta.push({
-                        ...chunk,
-                        folder: pair.folder,
-                        ips: pair.ips
-                    });
-                }
-            }
-            console.log(`[loadFlowsFromPath] Flattened to ${chunksMeta.length} total chunks`);
-
-            // Chunk path for v3: flows/by_pair/{folder}/{file}
-            getChunkPath = (chunk) => `${basePath}/flows/by_pair/${chunk.folder}/${chunk.file}`;
-
-        } else if (format === 'chunked_flows') {
-            // v2 format: flat chunks
-            console.log('[loadFlowsFromPath] Using chunked_flows format');
-
-            const chunksMetaResponse = await fetch(`${basePath}/flows/chunks_meta.json`);
-            if (!chunksMetaResponse.ok) {
-                throw new Error(`Failed to load chunks_meta.json: ${chunksMetaResponse.status}`);
-            }
-            chunksMeta = await chunksMetaResponse.json();
-            console.log(`[loadFlowsFromPath] Loaded metadata for ${chunksMeta.length} chunks`);
-
-            // Chunk path for v2: flows/{file}
-            getChunkPath = (chunk) => `${basePath}/flows/${chunk.file}`;
-
-        } else {
+        if (format !== 'flow_list_csv') {
             throw new Error(`Unsupported format: ${format}`);
         }
 
-        // Calculate totals from metadata
-        let totalFlows = 0;
-        let minTime = Infinity, maxTime = -Infinity;
-        for (const chunk of chunksMeta) {
-            totalFlows += chunk.count || 0;
-            if (chunk.start && chunk.start < minTime) minTime = chunk.start;
-            if (chunk.end && chunk.end > maxTime) maxTime = chunk.end;
-        }
-        const flowTimeExtent = [minTime, maxTime];
+        // flow_list_csv: per-flow data lives in indices/flow_list/*.csv (loaded on-demand
+        // by FlowListLoader). Overview bins come from indices/flow_bins_*.json via
+        // AdaptiveOverviewLoader. No chunk enumeration here.
+        const totalFlows = manifest.total_flows || 0;
+        const flowTimeExtent = [manifest.time_range.start, manifest.time_range.end];
 
         console.log(`[loadFlowsFromPath] Total flows: ${totalFlows}, time extent:`, flowTimeExtent);
+
+        // Load the flow list index so FlowListLoader is populated before FlowZoomManager is created.
+        await tryLoadFlowList(basePath);
 
         // Initialize adaptive overview loader early for resolution sync
         // This allows the packets view to determine resolution matching the overview chart
@@ -6812,6 +6927,16 @@ async function loadFlowsFromPath(basePath = DEFAULT_FLOW_DATA_PATH) {
                 console.log(`[loadFlowsFromPath] ✓ Adaptive overview loader initialized with resolutions:`,
                     Object.keys(adaptiveOverviewLoader.index.resolutions),
                     `initial resolution: ${adaptiveOverviewLoader.currentResolution} (${initialTimeRangeMinutes.toFixed(1)} min range)`);
+
+                // Create FlowZoomManager for semantic zoom in flow view
+                if (adaptiveOverviewLoader && adaptiveOverviewLoader.index) {
+                    const fll = getFlowListLoader();
+                    if (fll && fll.isLoaded()) {
+                        flowZoomManager = new FlowZoomManager(adaptiveOverviewLoader, fll);
+                        flowZoomManager.onDataLoaded = _onFlowZoomDataLoaded;
+                        console.log('[FlowZoomManager] Initialized');
+                    }
+                }
 
                 // Capture flow time extent for fallback
                 const capturedFlowTimeExtent = flowTimeExtent.slice();
@@ -6850,68 +6975,14 @@ async function loadFlowsFromPath(basePath = DEFAULT_FLOW_DATA_PATH) {
             console.log(`[loadFlowsFromPath] No multi-resolution index found:`, err.message);
         }
 
-        // Create on-demand chunk loader using fetch
-        const loadChunksForTimeRange = async (startTime, endTime, selectedIPs = null) => {
-            const selectedIPSet = selectedIPs && selectedIPs.length > 0 ? new Set(selectedIPs) : null;
-
-            // For v3 format, we can filter by IP pair first (much more efficient)
-            let relevantChunks;
-            if (format === 'chunked_flows_by_ip_pair' && selectedIPSet) {
-                // Only load chunks for pairs where BOTH IPs are in the selected set
-                relevantChunks = chunksMeta.filter(chunk =>
-                    chunk.end >= startTime && chunk.start <= endTime &&
-                    chunk.ips.every(ip => selectedIPSet.has(ip))
-                );
-                console.log(`[loadChunksForTimeRange] v3 IP-filtered: ${relevantChunks.length} chunks (from ${chunksMeta.length})`);
-            } else {
-                relevantChunks = chunksMeta.filter(chunk =>
-                    chunk.end >= startTime && chunk.start <= endTime
-                );
-            }
-
-            const allFlows = [];
-
-            for (const chunk of relevantChunks) {
-                try {
-                    const chunkPath = getChunkPath(chunk);
-                    const chunkResponse = await fetch(chunkPath);
-                    if (chunkResponse.ok) {
-                        const chunkFlows = await chunkResponse.json();
-
-                        const filtered = chunkFlows.filter(f => {
-                            // Filter by time range (match overview chart binning: by startTime only)
-                            if (f.startTime < startTime || f.startTime >= endTime) {
-                                return false;
-                            }
-                            // Filter by selected IPs if provided (both initiator AND responder must be in selected IPs)
-                            if (selectedIPSet && (!selectedIPSet.has(f.initiator) || !selectedIPSet.has(f.responder))) {
-                                return false;
-                            }
-                            return true;
-                        });
-
-                        allFlows.push(...filtered);
-                    }
-                } catch (err) {
-                    console.warn(`Failed to load flow chunk ${getChunkPath(chunk)}:`, err);
-                }
-            }
-
-            return allFlows;
-        };
-
         // Dispatch flowDataLoaded event with basePath for flow detail loading
         const event = new CustomEvent('flowDataLoaded', {
             detail: {
-                chunksMeta: chunksMeta,
-                pairsMeta: pairsMeta,
                 manifest: manifest,
                 totalFlows: totalFlows,
                 timeExtent: flowTimeExtent,
                 format: format,
-                loadChunksForTimeRange: loadChunksForTimeRange,
-                getChunkPath: getChunkPath,
-                basePath: basePath  // Store for flow detail loading
+                basePath: basePath
             }
         });
         document.dispatchEvent(event);
@@ -6919,12 +6990,11 @@ async function loadFlowsFromPath(basePath = DEFAULT_FLOW_DATA_PATH) {
         // Update folder info display
         const folderInfo = document.getElementById('folderInfo');
         if (folderInfo) {
-            const pairInfo = pairsMeta ? ` (${pairsMeta.length} IP pairs)` : '';
-            folderInfo.innerHTML = `<span style="color: #28a745;">Flow data: ${totalFlows.toLocaleString()} flows (${chunksMeta.length} chunks${pairInfo})</span>`;
+            folderInfo.innerHTML = `<span style="color: #28a745;">Flow data: ${totalFlows.toLocaleString()} flows</span>`;
         }
 
         console.log(`[loadFlowsFromPath] Flow data loaded successfully`);
-        return { chunksMeta, pairsMeta, manifest, totalFlows, flowTimeExtent };
+        return { manifest, totalFlows, flowTimeExtent };
 
     } catch (err) {
         console.error('[loadFlowsFromPath] Error loading flow data:', err);

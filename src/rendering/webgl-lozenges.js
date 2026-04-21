@@ -202,9 +202,8 @@ export class WebGLLozengeRenderer {
      * @param {Function} hScale - count → height scale (d3.scaleSqrt)
      * @param {number} minHeight - minimum lozenge height
      * @param {number} maxHeight - maximum lozenge max height
-     * @param {number} individualHeight - fixed height for non-binned flows
      */
-    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20, individualHeight = 6 } = {}) {
+    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20 } = {}) {
         const gl = this.gl;
         if (!gl) return;
 
@@ -217,7 +216,6 @@ export class WebGLLozengeRenderer {
         };
 
         const getH = (d) => {
-            if (!d.binned) return individualHeight;
             return hScale ? Math.max(minHeight, Math.min(maxHeight, hScale(d.count || 1))) : minHeight;
         };
 

@@ -22,7 +22,6 @@ export class CanvasFlowRenderer {
         this.hScale = null;
         this.minHeight = 4;
         this.maxHeight = 20;
-        this.individualHeight = 6;
 
         // Create canvas — fills the scroll container viewport
         this.canvas = document.createElement('canvas');
@@ -79,12 +78,11 @@ export class CanvasFlowRenderer {
     /**
      * Set lozenge data.
      */
-    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20, individualHeight = 6 } = {}) {
+    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20 } = {}) {
         this.colorMap = colorMap;
         this.hScale = hScale;
         this.minHeight = minHeight;
         this.maxHeight = maxHeight;
-        this.individualHeight = individualHeight;
 
         // Index items by initiator IP for fast per-row lookup
         this.itemsByIP = new Map();
@@ -254,7 +252,6 @@ export class CanvasFlowRenderer {
     }
 
     _getHeight(d) {
-        if (!d.binned) return this.individualHeight;
         return this.hScale
             ? Math.max(this.minHeight, Math.min(this.maxHeight, this.hScale(d.count || 1)))
             : this.minHeight;

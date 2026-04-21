@@ -27,7 +27,6 @@ export class WebGLFlowRenderer {
         this.hScale = null;
         this.minHeight = 4;
         this.maxHeight = 20;
-        this.individualHeight = 6;
         this.items = [];
         this.itemsByIP = new Map();
         this.instanceCount = 0;
@@ -183,13 +182,12 @@ export class WebGLFlowRenderer {
         this.showGroundTruth = !!show;
     }
 
-    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20, individualHeight = 6 } = {}) {
+    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20 } = {}) {
         console.log('[WebGLRenderer] setData called with', items?.length || 0, 'items');
         this.colorMap = colorMap;
         this.hScale = hScale;
         this.minHeight = minHeight;
         this.maxHeight = maxHeight;
-        this.individualHeight = individualHeight;
 
         this.itemsByIP = new Map();
         for (const d of items) {
@@ -242,7 +240,10 @@ export class WebGLFlowRenderer {
         for (let i = 0; i < n; i++) {
             const d = items[i];
             const ip = d.initiator || d.src_ip;
-            const yPos = this.ipPositions.get(ip);
+            // yPosWithOffset is set by renderLozenges when sub-row lanes are computed
+            // (flag separation, pair ordering). Fall back to ipPositions for callers
+            // that pass raw items without pre-computed positions (e.g. minimap).
+            const yPos = (d.yPosWithOffset !== undefined) ? d.yPosWithOffset : this.ipPositions.get(ip);
             if (yPos === undefined) continue;
 
             const xStart = d.binStart ?? d.startTime ?? d.binCenter ?? 0;
@@ -441,7 +442,6 @@ export class WebGLFlowRenderer {
     }
 
     _getHeight(d) {
-        if (!d.binned) return this.individualHeight;
         return this.hScale
             ? Math.max(this.minHeight, Math.min(this.maxHeight, this.hScale(d.count || 1)))
             : this.minHeight;
@@ -463,14 +463,16 @@ export class WebGLFlowRenderer {
         const dataX = mouseX - marginLeft;
 
         for (const ip of this.ipOrder) {
-            const yPos = this.ipPositions?.get(ip);
-            if (yPos === undefined) continue;
-            if (Math.abs(yPos - dataY) > this.rowGap / 2) continue;
+            const baseYPos = this.ipPositions?.get(ip);
+            if (baseYPos === undefined) continue;
+            if (Math.abs(baseYPos - dataY) > this.rowGap / 2) continue;
 
             const rowItems = this.itemsByIP.get(ip);
             if (!rowItems) continue;
 
             for (const d of rowItems) {
+                // Use pre-computed sub-row position when available
+                const yPos = (d.yPosWithOffset !== undefined) ? d.yPosWithOffset : baseYPos;
                 const xStart = d.binStart ?? d.startTime ?? d.binCenter ?? 0;
                 const xEnd = d.binEnd ?? d.endTime ?? xStart;
                 const xPx = xScale(xStart);

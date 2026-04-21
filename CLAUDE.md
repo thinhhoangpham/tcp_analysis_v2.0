@@ -11,6 +11,7 @@ Dual-visualization network traffic analysis system built with D3.js v7 for TCP p
 
 1. **Network TimeArcs** (`attack-network.html` → `attack-network.js`) - Arc-based visualization with force-directed IP positioning. Default: Force layout; Timearcs via toggle. Data source: "Attack Events" or "TCP Flows".
 2. **TCP Connection Analysis** (`tcp-analysis.html` → `tcp-analysis.js`) - Packet-level visualization with Packet View (circles) / Flow View (lozenges), Overview Bar chart, and Control Panel.
+3. **TCP Flow Analysis** (`tcp-flow-analysis.html` → `tcp-flow-analysis.js`) - Flow-only variant of #2. No packet data required; renders a dense, full-extent lozenge view of every IP in the flow dataset.
 
 ## Running the Application
 
@@ -24,7 +25,8 @@ python -m http.server 8000
 ## Architecture
 
 ```
-Main:    attack-network.js (~2200 LOC), tcp-analysis.js (~4600 LOC)
+Main:    attack-network.js (~2200 LOC), tcp-analysis.js (~4600 LOC),
+         tcp-flow-analysis.js (~7900 LOC)
 Support: control-panel.js, sidebar.js, legends.js, overview_chart.js,
          folder_integration.js, folder_loader.js, viewer_loader.js
 
@@ -54,6 +56,16 @@ Support: control-panel.js, sidebar.js, legends.js, overview_chart.js,
 ```
 
 > **Detailed subsystem docs**: see `ARCHITECTURE.md` (data formats, layout system, selection systems, pattern search DSL, etc.)
+
+## Flow-Only Mode (`tcp-flow-analysis.js`)
+
+Entered via `_initFlowOnlyChart(selectedIPs, timeExtent)` and `initFlowOnlyMode(...)`. Key traits:
+
+- **Single rendering surface**: the main chart area IS the dense/cramped view — every IP in the dataset is laid out at a sub-pixel row gap (`ROW_GAP_CRAMPED = 0.1` px) and drawn by `mainWebGLRenderer` (`WebGLFlowRenderer` in `src/rendering/webgl-flow-renderer.js`). There is no separate minimap panel.
+- **SVG is detached**: `createSVGStructure` runs so d3 selections (`fullDomainLayer`, `dynamicLayer`) are valid for `renderLozenges`, but the root SVG is immediately `.remove()`d from the DOM — WebGL is the sole painter. `svg` and `mainGroup` are set to `null`, so every SVG-appending function (`_renderAllIPLabels`, `drawGroundTruthBoxes`, `drawSelectedFlowArcs`, etc.) relies on its early-return guard. **Do not dereference `svg`/`mainGroup` in this mode without a null check.**
+- **Zoom target**: since the SVG is gone, `zoom` is attached to `#chart-container` (a div), not to an SVG element.
+- **Layout state** (`state.layout.ipPositions`, `ipRowHeights`, `ipPairCounts`) is populated with the cramped gap; `mainWebGLRenderer.setLayout(ipOrder, ipPositions, ROW_GAP_CRAMPED)` receives the same value. The module-level `ROW_GAP` (30) is only passed as the `ROW_GAP` option to `renderLozenges` for SVG-fallback height bookkeeping — it is not the flow-only row gap.
+- **Lozenge heights** come from a `d3.scaleSqrt()` domain `[1, maxCount] → [LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT]` (currently `1 → 5` px in `src/config/constants.js`). There is no separate "individual" height constant — a non-binned single flow uses the same scale as a count=1 bin.
 
 ## Critical Gotchas
 

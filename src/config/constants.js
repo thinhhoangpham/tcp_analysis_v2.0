@@ -134,6 +134,30 @@ export const DEFAULT_FLOW_COLORS = {
     invalid: {}
 };
 
+// === Flow Lozenge View Constants ===
+
+// Lozenge height scaling (analogous to RADIUS_MIN/RADIUS_MAX for circles)
+export const LOZENGE_MIN_HEIGHT = 1;
+export const LOZENGE_MAX_HEIGHT = 5;
+
+// Minimum lozenge width in pixels (so very short flows are still visible)
+export const LOZENGE_MIN_WIDTH = 4;
+
+// Close type sort order for stacking (analogous to FLAG_PHASE_ORDER for circles)
+// Order: successful first, then invalid types, then ongoing
+export const CLOSE_TYPE_STACK_ORDER = [
+    'graceful',
+    'abortive',
+    'rst_during_handshake',
+    'invalid_ack',
+    'invalid_synack',
+    'incomplete_no_synack',
+    'incomplete_no_ack',
+    'unknown_invalid',
+    'ongoing',
+    'open'
+];
+
 // Default event colors for ground truth
 export const DEFAULT_EVENT_COLORS = {
     'normal': '#4B4B4B',
@@ -152,3 +176,8 @@ export const ZOOM_STEP = 2;
 // Minimum visible range in microseconds (1 second)
 // Prevents zooming in beyond this level
 export const MIN_ZOOM_RANGE_US = 1000000;
+
+// ── Semantic zoom clustering (flow view) ──────────────────────────
+export const CLUSTER_GAP_PX = 3;                        // pixel gap below which flows merge
+export const INDIVIDUAL_FLOW_THRESHOLD_MINUTES = 10;     // load individual flows below this visible range
+export const MAX_INDIVIDUAL_FLOWS_PER_PAIR = 50000;      // don't load pairs bigger than this
