@@ -80,6 +80,8 @@ export function createDurationLabelUpdater(context) {
  * @param {Function} context.getUseMultiRes - Get useMultiRes flag
  * @param {Function} context.setCurrentResolutionLevel - Set current resolution
  * @param {Function} context.logCatchError - Error logger
+ * @param {Function} context.getFlowZoomManager - Get FlowZoomManager instance (may be null)
+ * @param {Function} context.getSelectedIPs - Get currently selected IP addresses
  * @returns {Function} Zoom event handler
  */
 export function createTimeArcsZoomHandler(context) {
@@ -123,7 +125,9 @@ export function createTimeArcsZoomHandler(context) {
         clearAutoFlowThreading,
         logCatchError,
         applyIPRowFilter,
-        restoreBaseRows
+        restoreBaseRows,
+        getFlowZoomManager,
+        getSelectedIPs
     } = context;
 
     return function zoomed({ transform, sourceEvent }) {
@@ -259,7 +263,8 @@ export function createTimeArcsZoomHandler(context) {
         const fullDomainBinsCache = getFullDomainBinsCache();
 
         // Early return if at full domain with cached data
-        if ((isHardResetInProgress || (atFullDomainImmediate && !flowsFilteringActiveImmediate)) &&
+        if (state.ui.renderMode !== 'flows' &&
+            (isHardResetInProgress || (atFullDomainImmediate && !flowsFilteringActiveImmediate)) &&
             !flowsFilteringActiveImmediate && fullDomainLayer && fullDomainBinsCache.data.length > 0) {
             if (fullDomainLayer) fullDomainLayer.style('display', null);
             if (dynamicLayer) dynamicLayer.style('display', 'none');
@@ -314,7 +319,7 @@ export function createTimeArcsZoomHandler(context) {
             const currentCache = getFullDomainBinsCache();
 
             // Return to cached full domain view if applicable
-            if (atFullDomain && !flowsFilteringActive && fullDomainLayer && currentCache.data.length > 0) {
+            if (state.ui.renderMode !== 'flows' && atFullDomain && !flowsFilteringActive && fullDomainLayer && currentCache.data.length > 0) {
                 fullDomainLayer.style('display', null);
                 if (dynamicLayer) dynamicLayer.style('display', 'none');
                 try { updateZoomDurationLabel(); } catch (e) { logCatchError('updateZoomDurationLabel', e); }
@@ -327,6 +332,42 @@ export function createTimeArcsZoomHandler(context) {
             // Switch to dynamic layer
             if (fullDomainLayer) fullDomainLayer.style('display', 'none');
             if (dynamicLayer) dynamicLayer.style('display', null);
+
+            // ── Flow view: semantic zoom via FlowZoomManager ──────────────
+            if (state.ui.renderMode === 'flows' && getFlowZoomManager && getFlowZoomManager()) {
+                try {
+                    const mgr = getFlowZoomManager();
+                    const ips = getSelectedIPs ? getSelectedIPs() : [];
+                    if (ips.length >= 2) {
+                        const result = await mgr.getClusteredFlowData(xScale, ips);
+                        state.flowView.binnedData = result.items;
+                        state.flowView.globalMaxCount = result.globalMaxCount;
+                        state.flowView.resolution = result.resolution;
+                        state.flowView.tier = result.tier;
+                    }
+                } catch (e) { logCatchError('flowZoomManager', e); }
+
+                // Row filtering — reuse same logic as packet view.
+                // Build items with src_ip/dst_ip so computeActiveIPs works.
+                const flowItems = (state.flowView.binnedData || []).map(d => ({
+                    src_ip: d.initiator, dst_ip: d.responder
+                }));
+                if (applyIPRowFilter && !atFullDomain && flowItems.length > 0) {
+                    try { applyIPRowFilter(flowItems); } catch(e) { logCatchError('applyIPRowFilter-flow', e); }
+                } else if (restoreBaseRows && atFullDomain) {
+                    try { restoreBaseRows(); } catch(e) { logCatchError('restoreBaseRows-flow', e); }
+                }
+
+                renderMarksForLayer(dynamicLayer, null, null, null);
+
+                try {
+                    const visibleRangeUsFlow = xScale.domain()[1] - xScale.domain()[0];
+                    const resolutionFlow = getResolutionForVisibleRange(visibleRangeUsFlow);
+                    updateZoomIndicator(visibleRangeUsFlow, resolutionFlow);
+                } catch (e) { logCatchError('updateZoomIndicator-flow', e); }
+                try { updateZoomDurationLabel(); } catch (e) { logCatchError('updateZoomDurationLabel-flow', e); }
+                return;
+            }
 
             let binnedPackets;
             let usedMultiRes = false;

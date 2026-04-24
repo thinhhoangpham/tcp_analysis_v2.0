@@ -240,6 +240,11 @@ const filterCache = new Map();
 
 // Cache for full-domain binned result to make Reset View fast (state.data.version moved to state.data)
 let fullDomainBinsCache = { version: -1, data: [], binSize: null, sorted: false };
+let _flowOnlyIPStats = null;
+let _flowOnlyBasePath = null;
+let _flowOnlyAllIPs = null;
+let _flowOnlyRawTimeExtent = null;
+let _flowOnlyAIOrder = null;
 // Global radius scaling: anchor sizes across zooms
 // - RADIUS_MIN: circle size for an individual packet (count = 1)
 // - globalMaxBinCount: computed from the initial full-domain binning; reused at all zoom levels
@@ -6140,9 +6145,8 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
             ).map(cb => cb.value)
         });
         zoom = createZoomBehavior({ d3, scaleExtent: [1, 1e9], onZoom: zoomed });
-        // SVG is removed in flow-only mode; attach zoom to the chart container div instead.
         zoomTarget = d3.select(chartContainerEl);
-        zoomTarget.call(zoom);
+        // Flow-only WebGL view is a static overview — do not attach zoom handlers.
     } catch (e) { console.warn('[FlowOnly] Zoom handler init failed', e); }
 
     fullDomainBinsCache = { version: state.data.version, data: [], binSize: null, sorted: false };
@@ -6156,6 +6160,8 @@ function _initFlowOnlyChart(selectedIPs, timeExtent) {
     if (state.flowView && state.flowView.binnedData && state.flowView.binnedData.length > 0) {
         try { renderMarksForLayerLocal(fullDomainLayer, state.flowView.binnedData); } catch (e) {}
     }
+
+    _initMagnifierBrush(chartContainerEl, margin);
 
     console.log(`[FlowOnly] Chart initialized: ${selectedIPs.length} IP rows, time range ${(span / 60_000_000).toFixed(1)} min`);
 }
@@ -6242,6 +6248,498 @@ function _renderAllIPLabels(mainMargin) {
         .text(d => d);
 }
 
+let _magnifierResizeObs = null;
+let _magnifierCascade = 0;
+const _magnifierBrushes = new Map();  // panelId -> { editG, panel }
+let _magnifierPanelCounter = 0;
+
+/**
+ * Attach a D3 2D brush overlay to the flow-only WebGL view.
+ * Each completed brush spawns an in-page floating magnifier panel via
+ * _spawnMagnifierPanel, showing the selected IPs and time range as
+ * spacious SVG lozenges.
+ *
+ * The overlay SVG is a separate element (not the main SVG, which is removed
+ * in flow-only mode).  The brush <g> is translated by (margin.left, margin.top)
+ * so its pixel coordinates match the ipPositions values directly — both start
+ * at TOP_PAD = 30 and neither has an additional offset.
+ */
+function _initMagnifierBrush(chartContainerEl, margin) {
+    if (!chartContainerEl) return;
+
+    if (_magnifierResizeObs) { try { _magnifierResizeObs.disconnect(); } catch(e) {} _magnifierResizeObs = null; }
+
+    // Close and remove all existing edit brushes and panels from a prior chart init.
+    for (const entry of _magnifierBrushes.values()) {
+        try { entry.editG.remove(); } catch (e) {}
+        try { entry.panel.remove(); } catch (e) {}
+    }
+    _magnifierBrushes.clear();
+
+    // Remove any previous overlay from a prior chart init.
+    const existing = chartContainerEl.querySelector('.magnifier-brush-overlay');
+    if (existing) existing.remove();
+
+    const totalW = chartContainerEl.clientWidth;
+    const totalH = height + margin.top + margin.bottom;  // full content height
+    const innerW = totalW - margin.left - margin.right;
+    const innerH = height;  // inner plot height = content minus margins
+
+    const overlaySvg = d3.select(chartContainerEl)
+        .append('svg')
+        .attr('class', 'magnifier-brush-overlay')
+        .attr('width', totalW)
+        .attr('height', totalH)
+        .style('position', 'absolute')
+        .style('left', '0')
+        .style('top', '0')
+        .style('z-index', '5')
+        .style('pointer-events', 'none');
+
+    const brushGroup = overlaySvg.append('g')
+        .attr('class', 'magnifier-brush')
+        .attr('transform', `translate(${margin.left},${margin.top})`)
+        .style('pointer-events', 'all');
+
+    const brush = d3.brush()
+        .extent([[0, 0], [innerW, innerH]])
+        .on('end', function (event) {
+            if (!event.selection) return;
+            const [[x0, y0], [x1, y1]] = event.selection;
+
+            // Time range from the X axis (xScale operates in microseconds).
+            const tMinUs = xScale.invert(x0);
+            const tMaxUs = xScale.invert(x1);
+            if (tMinUs >= tMaxUs) {
+                console.warn('[MagnifierBrush] Degenerate time range, ignoring.');
+                return;
+            }
+
+            // IP subset: include IPs whose cramped Y position falls in [y0, y1].
+            // The overlay now lives inside the scrollable content, so brush pixel Y
+            // already equals data-space Y — no scrollTop adjustment needed.
+            // ipPositions values start at TOP_PAD = 30 and increment by ROW_GAP_CRAMPED = 0.1,
+            // and the brush <g> is translated by margin.top so the coordinate systems align.
+            const selectedIPsArray = state.layout.ipOrder.filter(ip => {
+                const pos = state.layout.ipPositions.get(ip);
+                return pos !== undefined && pos >= y0 && pos <= y1;
+            });
+
+            if (selectedIPsArray.length === 0) {
+                console.warn('[MagnifierBrush] No IPs in selection, ignoring.');
+                return;
+            }
+
+            try {
+                const panelId = ++_magnifierPanelCounter;
+                const { panel, update } = _spawnMagnifierPanel(selectedIPsArray, Math.floor(tMinUs), Math.ceil(tMaxUs));
+
+                // Create a persistent edit brush <g> appended after the draw brushGroup
+                // so it sits above it (later siblings paint on top in SVG).
+                const editG = overlaySvg.append('g')
+                    .attr('class', `magnifier-edit-brush mag-brush-${panelId}`)
+                    .attr('transform', `translate(${margin.left},${margin.top})`)
+                    .style('pointer-events', 'all');
+
+                let rafId = null;
+                const scheduleUpdate = (ips, tmin, tmax) => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    rafId = requestAnimationFrame(() => {
+                        rafId = null;
+                        update(ips, tmin, tmax);
+                    });
+                };
+
+                const editBrush = d3.brush()
+                    .extent([[0, 0], [innerW, innerH]])
+                    .on('brush end', (editEvent) => {
+                        if (!editEvent.selection) return;
+                        const [[ex0, ey0], [ex1, ey1]] = editEvent.selection;
+                        const newTMin = xScale.invert(ex0);
+                        const newTMax = xScale.invert(ex1);
+                        if (newTMin >= newTMax) return;
+                        const newIps = state.layout.ipOrder.filter(ip => {
+                            const pos = state.layout.ipPositions.get(ip);
+                            return pos !== undefined && pos >= ey0 && pos <= ey1;
+                        });
+                        if (newIps.length === 0) return;
+                        scheduleUpdate(newIps, Math.floor(newTMin), Math.ceil(newTMax));
+                    });
+
+                editG.call(editBrush);
+                // Prepopulate the edit brush selection to match the drawn rectangle.
+                editBrush.move(editG, [[x0, y0], [x1, y1]]);
+
+                // Make the edit brush's overlay rect pass-through so the draw brush
+                // can still capture new drag gestures in empty space below.
+                editG.select('.overlay').style('pointer-events', 'none');
+
+                // Style the edit brush selection and handles to match the draw brush.
+                editG.select('.selection')
+                    .style('fill', 'rgba(74, 144, 226, 0.15)')
+                    .style('stroke', '#4a90e2')
+                    .style('stroke-width', '1px');
+
+                _magnifierBrushes.set(panelId, { editG, panel });
+
+                // Wire close button to remove both the edit brush <g> and the panel.
+                const closeBtn = panel.querySelector('.magnifier-close');
+                if (closeBtn) {
+                    closeBtn.onclick = () => {
+                        if (rafId) cancelAnimationFrame(rafId);
+                        if (panel.__magnifierCleanup) panel.__magnifierCleanup();
+                        try { editG.remove(); } catch (e) {}
+                        try { panel.remove(); } catch (e) {}
+                        _magnifierBrushes.delete(panelId);
+                    };
+                }
+
+                // Clear the draw brush rectangle now that the edit brush owns the region.
+                brushGroup.call(brush.move, null);
+            } catch (e) {
+                console.warn('[MagnifierBrush] Failed to spawn panel:', e);
+            }
+        });
+
+    brushGroup.call(brush);
+
+    // Style the draw brush selection rectangle.
+    overlaySvg.select('.selection')
+        .style('fill', 'rgba(74, 144, 226, 0.15)')
+        .style('stroke', '#4a90e2')
+        .style('stroke-width', '1px');
+
+    // Resize the overlay when the container changes size.
+    _magnifierResizeObs = new ResizeObserver(entries => {
+        for (const entry of entries) {
+            const newW = entry.contentRect.width;
+            const newTotalH = height + margin.top + margin.bottom;
+            overlaySvg.attr('width', newW).attr('height', newTotalH);
+            brush.extent([[0, 0], [newW - margin.left - margin.right, height]]);
+            brushGroup.call(brush);
+        }
+    });
+    _magnifierResizeObs.observe(chartContainerEl);
+}
+
+function _spawnMagnifierPanel(ipSubset, tMinUs, tMaxUs) {
+    const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const panelW = 1000;
+    const panelH = 600;
+    const maxLeft = Math.max(0, window.innerWidth - panelW);
+    const maxTop  = Math.max(0, window.innerHeight - panelH);
+    const rawLeft = 40 + _magnifierCascade * 28;
+    const rawTop  = 40 + _magnifierCascade * 28;
+    _magnifierCascade = (_magnifierCascade + 1) % 8;
+
+    const panelLeft = Math.min(rawLeft, maxLeft);
+    const panelTop  = Math.min(rawTop,  maxTop);
+
+    const panel = document.createElement('div');
+    panel.className = 'magnifier-panel';
+    Object.assign(panel.style, {
+        position: 'fixed', zIndex: '1000',
+        background: '#fff', border: '1px solid #adb5bd',
+        borderRadius: '4px', boxShadow: '0 20px 60px rgba(0,0,0,0.45), 0 8px 20px rgba(0,0,0,0.3)',
+        width: `${panelW}px`, height: `${panelH}px`,
+        top: `${panelTop}px`, left: `${panelLeft}px`,
+        display: 'flex', flexDirection: 'column'
+    });
+
+    const header = document.createElement('div');
+    header.className = 'magnifier-header';
+    Object.assign(header.style, {
+        cursor: 'move', padding: '6px 10px', background: '#f1f3f5',
+        borderBottom: '1px solid #dee2e6', display: 'flex',
+        alignItems: 'center', justifyContent: 'space-between',
+        fontSize: '12px', fontFamily: 'monospace', flexShrink: '0'
+    });
+    const headerLabel = document.createElement('span');
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'magnifier-close';
+    closeBtn.textContent = '×';
+    Object.assign(closeBtn.style, {
+        background: 'none', border: 'none', cursor: 'pointer',
+        fontSize: '16px', lineHeight: '1', padding: '0 2px'
+    });
+    // closeBtn.onclick is wired by the caller (_initMagnifierBrush) after panel creation.
+    header.appendChild(headerLabel);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'magnifier-body';
+    body.id = `mag-body-${uid}`;
+    Object.assign(body.style, { flex: '1', overflow: 'auto', position: 'relative' });
+
+    const bottomBar = document.createElement('div');
+    Object.assign(bottomBar.style, {
+        padding: '4px 10px', background: '#f1f3f5',
+        borderTop: '1px solid #dee2e6',
+        fontSize: '12px', fontFamily: 'monospace',
+        flexShrink: '0'
+    });
+
+    panel.appendChild(header);
+    panel.appendChild(body);
+    panel.appendChild(bottomBar);
+    document.body.appendChild(panel);
+
+    const tooltipEl = document.getElementById('tooltip');
+    const clampTooltipToPanel = () => {
+        if (!tooltipEl || tooltipEl.style.display === 'none') return;
+        const panelRect = panel.getBoundingClientRect();
+        const ttRect = tooltipEl.getBoundingClientRect();
+        const scrollX = window.scrollX || window.pageXOffset || 0;
+        const scrollY = window.scrollY || window.pageYOffset || 0;
+        const minLeftPage = panelRect.left + scrollX + 4;
+        const maxLeftPage = panelRect.right + scrollX - ttRect.width - 4;
+        const minTopPage  = panelRect.top  + scrollY + 4;
+        const maxTopPage  = panelRect.bottom + scrollY - ttRect.height - 4;
+        const curLeft = parseFloat(tooltipEl.style.left) || 0;
+        const curTop  = parseFloat(tooltipEl.style.top)  || 0;
+        const newLeft = Math.max(minLeftPage, Math.min(maxLeftPage, curLeft));
+        const newTop  = Math.max(minTopPage,  Math.min(maxTopPage,  curTop));
+        if (newLeft !== curLeft) tooltipEl.style.left = `${newLeft}px`;
+        if (newTop  !== curTop)  tooltipEl.style.top  = `${newTop}px`;
+    };
+    body.addEventListener('mousemove', clampTooltipToPanel);
+    body.addEventListener('mouseover', clampTooltipToPanel);
+    panel.__magnifierCleanup = () => {
+        body.removeEventListener('mousemove', clampTooltipToPanel);
+        body.removeEventListener('mouseover', clampTooltipToPanel);
+    };
+
+    // Inline drag — no imports from control-panel.js
+    let dragState = null;
+    const onMouseMove = (e) => {
+        if (!dragState) return;
+        const newLeft = Math.max(0, Math.min(window.innerWidth  - 60, e.clientX - dragState.offsetX));
+        const newTop  = Math.max(0, Math.min(window.innerHeight - 30, e.clientY - dragState.offsetY));
+        panel.style.left = `${newLeft}px`;
+        panel.style.top  = `${newTop}px`;
+    };
+    const onMouseUp = () => {
+        dragState = null;
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+    };
+    header.addEventListener('mousedown', (e) => {
+        if (e.target === closeBtn || e.button !== 0) return;
+        const rect = panel.getBoundingClientRect();
+        dragState = { offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top };
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        e.preventDefault();
+    });
+
+    const renderBody = (ips, tMin, tMax) => {
+        // Clear previous render before rebuilding so re-renders don't pile up SVG elements.
+        body.innerHTML = '';
+
+        const binnedData = state.flowView && state.flowView.binnedData;
+        if (!binnedData || binnedData.length === 0) {
+            body.textContent = 'No data loaded yet';
+            return;
+        }
+
+        // Update header label to reflect the current ip count and time range.
+        const tMinFmt = formatTimestamp ? formatTimestamp(tMin).utcTime : String(tMin);
+        const tMaxFmt = formatTimestamp ? formatTimestamp(tMax).utcTime : String(tMax);
+        headerLabel.textContent = `${ips.length} IPs`;
+        bottomBar.textContent = `${tMinFmt} → ${tMaxFmt}`;
+
+        const panelMargin = { top: 10, right: 16, bottom: 28, left: 0 };
+        const bodyW  = body.clientWidth  || panelW;
+        const bodyH  = body.clientHeight || (panelH - 36);
+
+        const TOP_PAD = 20;
+        const availablePlotH = bodyH - panelMargin.top - panelMargin.bottom;
+        const ROW_GAP = Math.max(0.1, availablePlotH / Math.max(1, ips.length));
+        const ipPositions      = new Map();
+        const ipRowHeights     = new Map();
+        const ipPairCounts     = new Map();
+        const ipPairOrderByRow = new Map();
+        let y = TOP_PAD;
+        for (const ip of ips) {
+            ipPositions.set(ip, y);
+            ipRowHeights.set(ip, ROW_GAP);
+            ipPairCounts.set(ip, 1);
+            y += ROW_GAP;
+        }
+
+        const svgHeight = bodyH;
+        body.style.overflow = 'hidden';
+
+        // body.id is stable across re-renders; createSVGStructure appends into it.
+        const svgResult = createSVGStructure({
+            d3,
+            containerId: `#mag-body-${uid}`,
+            width: bodyW,
+            height: svgHeight,
+            margin: panelMargin,
+            dotRadius: 4
+        });
+
+        const clipId = `clip-mag-${uid}`;
+        svgResult.svg.select('defs clipPath').attr('id', clipId);
+        svgResult.mainGroup.attr('clip-path', `url(#${clipId})`);
+
+        const plotW  = bodyW - panelMargin.left - panelMargin.right;
+        const xScale = d3.scaleLinear().domain([tMin, tMax]).range([0, plotW]);
+
+        const ipSet   = new Set(ips);
+        const filtered = binnedData.filter(d => {
+            const t0 = d.binStart  ?? d.startTime  ?? 0;
+            const t1 = d.binEnd    ?? d.endTime    ?? t0;
+            return ipSet.has(d.initiator) && t1 >= tMin && t0 <= tMax;
+        });
+
+        const collapsedSet = new Set(ips);
+        const aliased = filtered.map(d => ({
+            ...d,
+            src_ip: d.initiator,
+            dst_ip: d.responder,
+            flagType: d.closeType
+        }));
+        const items = collapseSubRowsBins(aliased, collapsedSet);
+
+        const maxCount = state.flowView.globalMaxCount || 1;
+        const MAG_LOZENGE_MIN_HEIGHT = 4;
+        const MAG_LOZENGE_MAX_HEIGHT = 20;
+        const hScale = d3.scaleSqrt()
+            .domain([1, Math.max(1, maxCount)])
+            .range([MAG_LOZENGE_MIN_HEIGHT, MAG_LOZENGE_MAX_HEIGHT]);
+
+        const colorMap = new Map();
+        if (flowColors.closing)  for (const [k, v] of Object.entries(flowColors.closing))  colorMap.set(k, v);
+        if (flowColors.ongoing)  for (const [k, v] of Object.entries(flowColors.ongoing))  colorMap.set(k, v);
+        if (flowColors.invalid)  for (const [k, v] of Object.entries(flowColors.invalid))  colorMap.set(k, v);
+
+        renderLozenges(svgResult.fullDomainLayer, items, {
+            xScale, hScale, flowColorMap: colorMap,
+            LOZENGE_MIN_HEIGHT: MAG_LOZENGE_MIN_HEIGHT, LOZENGE_MAX_HEIGHT: MAG_LOZENGE_MAX_HEIGHT, LOZENGE_MIN_WIDTH,
+            ROW_GAP, ipRowHeights, ipPairCounts,
+            stableIpPairOrderByRow: ipPairOrderByRow,
+            subRowHeights: null, subRowOffsets: null,
+            mainGroup: svgResult.mainGroup,
+            findIPPosition: ip => ipPositions.get(ip),
+            ipPositions,
+            createTooltipHTML: createFlowLozengeTooltipHTML,
+            d3, CLOSE_TYPE_STACK_ORDER,
+            separateFlags: false,
+            skipSvgRects: false
+        });
+
+        const plotH = svgHeight - panelMargin.top - panelMargin.bottom;
+        const axis  = d3.axisBottom(xScale).ticks(6);
+        svgResult.svg.append('g')
+            .attr('class', 'x-axis')
+            .attr('transform', `translate(0,${plotH})`)
+            .call(axis);
+
+        const ipLabel = document.createElement('div');
+        Object.assign(ipLabel.style, {
+            position: 'absolute', top: '4px', left: '6px',
+            font: '11px/1 monospace', background: 'rgba(255,255,255,0.85)',
+            padding: '2px 6px', borderRadius: '2px',
+            pointerEvents: 'none', display: 'none'
+        });
+        body.appendChild(ipLabel);
+
+        const svgNode = svgResult.svg.node();
+        svgNode.addEventListener('mousemove', (event) => {
+            const [, localY] = d3.pointer(event, svgResult.mainGroup.node());
+            if (localY < 0 || localY > plotH) { ipLabel.style.display = 'none'; return; }
+            let nearestIp = ips[0], minDist = Infinity;
+            for (const ip of ips) {
+                const dist = Math.abs((ipPositions.get(ip) ?? 0) - localY);
+                if (dist < minDist) { minDist = dist; nearestIp = ip; }
+            }
+            ipLabel.textContent = nearestIp;
+            ipLabel.style.display = '';
+        });
+        svgNode.addEventListener('mouseleave', () => { ipLabel.style.display = 'none'; });
+    };
+
+    renderBody(ipSubset, tMinUs, tMaxUs);
+
+    return { panel, update: renderBody };
+}
+
+async function loadAIOrder() {
+    if (_flowOnlyAIOrder) return _flowOnlyAIOrder;
+    try {
+        const resp = await fetch('/set1_60min_flows/indices/ip_order.txt');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await resp.text();
+        _flowOnlyAIOrder = text.split('\n').map(l => l.trim()).filter(Boolean);
+        return _flowOnlyAIOrder;
+    } catch (e) {
+        console.warn('[FlowOnly] Failed to load AI order:', e);
+        return null;
+    }
+}
+
+function sortIPsByMode(ips, mode) {
+    const stats = _flowOnlyIPStats;
+    if (mode === 'activity_total' && stats) {
+        return [...ips].sort((a, b) => {
+            const va = (stats[a]?.sent_packets ?? 0) + (stats[a]?.recv_packets ?? 0);
+            const vb = (stats[b]?.sent_packets ?? 0) + (stats[b]?.recv_packets ?? 0);
+            return vb - va;
+        });
+    }
+    if (mode === 'activity_initiator' && stats) {
+        return [...ips].sort((a, b) => {
+            const va = stats[a]?.sent_packets ?? 0;
+            const vb = stats[b]?.sent_packets ?? 0;
+            return vb - va;
+        });
+    }
+    if (mode === 'flow_count' && Array.isArray(state.flowView?.binnedData) && state.flowView.binnedData.length > 0) {
+        const counts = new Map();
+        for (const item of state.flowView.binnedData) {
+            if (!item || !item.initiator) continue;
+            counts.set(item.initiator, (counts.get(item.initiator) || 0) + (item.count || 0));
+        }
+        return [...ips].sort((a, b) => (counts.get(b) || 0) - (counts.get(a) || 0));
+    }
+    if (mode === 'ai' && _flowOnlyAIOrder) {
+        const rank = new Map(_flowOnlyAIOrder.map((ip, i) => [ip, i]));
+        return [...ips].sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity));
+    }
+    if (stats) {
+        return [...ips].sort((a, b) => {
+            const ta = stats[a]?.first_ts ?? Infinity;
+            const tb = stats[b]?.first_ts ?? Infinity;
+            return ta - tb;
+        });
+    }
+    return [...ips].sort();
+}
+
+async function applyIPRowOrder() {
+    if (!_flowOnlyAllIPs || !(_flowOnlyRawTimeExtent || state.data.timeExtent)) return;
+    const mode = document.getElementById('ipRowOrder')?.value || 'first_seen';
+
+    if (mode === 'ai' && !_flowOnlyAIOrder) await loadAIOrder();
+
+    const checked = new Set(
+        Array.from(document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked'))
+             .map(cb => cb.value)
+    );
+
+    const sortedIPs = sortIPsByMode(_flowOnlyAllIPs, mode);
+
+    createIPCheckboxes(sortedIPs);
+    document.querySelectorAll('#ipCheckboxes input[type="checkbox"]').forEach(cb => {
+        cb.checked = checked.size === 0 ? true : checked.has(cb.value);
+    });
+
+    _initFlowOnlyChart(sortedIPs, (_flowOnlyRawTimeExtent || state.data.timeExtent));
+}
+
 /**
  * Initialise the visualization for flows-only startup (no packet data loaded).
  * Fetches the IP list from the flow dataset's ips/unique_ips.json, seeds
@@ -6251,31 +6749,35 @@ async function initFlowOnlyMode(flowBasePath, flowTimeExtent) {
     // Seed time extent so xScale and overview chart have a valid range
     if (Array.isArray(flowTimeExtent) && flowTimeExtent[0] < flowTimeExtent[1]) {
         state.data.timeExtent = flowTimeExtent.slice();
+        _flowOnlyRawTimeExtent = flowTimeExtent.slice();
         console.log('[FlowOnly] Seeded state.data.timeExtent from flow range:', state.data.timeExtent);
     }
 
     // Load the IP list produced alongside the flow data
     try {
+        _flowOnlyBasePath = flowBasePath;
         const resp = await fetch(`${flowBasePath}/ips/unique_ips.json`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const ips = await resp.json();
+        _flowOnlyAllIPs = ips;
 
-        // Sort IPs by first connection time
-        let sortedIPs = ips;
         try {
             const statsResp = await fetch(`${flowBasePath}/ips/ip_stats.json`);
-            if (statsResp.ok) {
-                const ipStats = await statsResp.json();
-                sortedIPs = [...ips].sort((a, b) => {
-                    const ta = ipStats[a]?.first_ts ?? Infinity;
-                    const tb = ipStats[b]?.first_ts ?? Infinity;
-                    return ta - tb;
-                });
-            }
-        } catch (_) { sortedIPs = ips.sort(); }
+            if (statsResp.ok) _flowOnlyIPStats = await statsResp.json();
+        } catch (_) { _flowOnlyIPStats = null; }
+
+        const mode = document.getElementById('ipRowOrder')?.value || 'first_seen';
+        if (mode === 'ai' && !_flowOnlyAIOrder) await loadAIOrder();
+        const sortedIPs = sortIPsByMode(ips, mode);
 
         createIPCheckboxes(sortedIPs);
         document.querySelectorAll('#ipCheckboxes input[type="checkbox"]').forEach(cb => cb.checked = true);
+
+        const orderSel = document.getElementById('ipRowOrder');
+        if (orderSel && !orderSel.dataset.bound) {
+            orderSel.addEventListener('change', applyIPRowOrder);
+            orderSel.dataset.bound = '1';
+        }
 
         // Build chart directly from flow data — no packets needed
         _initFlowOnlyChart(sortedIPs, flowTimeExtent);

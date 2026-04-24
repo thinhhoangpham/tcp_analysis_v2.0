@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>TCP Analysis</title>
+    <title>TCP Flow Analysis</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/regl@2.1.0/dist/regl.min.js"></script>
     <link rel="stylesheet" href="tcp-analysis.css">
     <link rel="stylesheet" href="src/ui/pattern-builder-popup.css">
 </head>
@@ -64,6 +65,14 @@
         <div class="controls">
         <div class="control-group">
             <label>IP Addresses</label>
+            <label style="display:block; margin-bottom:4px;">Row Order</label>
+            <select id="ipRowOrder" style="width:100%; margin-bottom:6px; padding:3px 5px; border:1px solid #ced4da; border-radius:3px; font-size:11px;">
+                <option value="first_seen" selected>First seen (ascending)</option>
+                <option value="activity_total">Activity volume, total (descending)</option>
+                <option value="activity_initiator">Activity volume, initiator only (descending)</option>
+                <option value="flow_count">Flow count, initiator (descending)</option>
+                <option value="ai">AI (custom order)</option>
+            </select>
             <div id="ipSelector" style="border: 1px solid #dee2e6; padding: 7px; background: white; border-radius: 4px;">
                 <div style="margin-bottom: 6px;">
                     <input type="text" id="ipSearch" placeholder="Search IP addresses..." style="width: 100%; padding: 3px 5px; margin-bottom: 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px;">
@@ -77,10 +86,10 @@
             <div id="viewModeToggle" style="margin-bottom: 8px; padding: 6px 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;">
                 <span style="font-size: 11px; font-weight: bold; color: #495057; margin-right: 8px;">View Mode:</span>
                 <label style="font-size: 11px; margin-right: 10px; cursor: pointer;">
-                    <input type="radio" name="viewMode" value="packets" checked style="margin-right: 3px;">Packets
+                    <input type="radio" name="viewMode" value="packets" style="margin-right: 3px;">Packets
                 </label>
                 <label style="font-size: 11px; cursor: pointer;">
-                    <input type="radio" name="viewMode" value="flows" style="margin-right: 3px;">Flows
+                    <input type="radio" name="viewMode" value="flows" checked style="margin-right: 3px;">Flows
                 </label>
             </div>
             <label>TCP Flags</label>
@@ -184,6 +193,12 @@
         </div>
     </div>
     <div id="patternBuilderPopup" class="pb-hidden"></div>
-    <script type="module" src="./viewer_loader.js"></script>
+    <script type="module">
+        const cacheBust = `?v=${Date.now()}`;
+        const mod = await import(`./tcp-flow-analysis.js${cacheBust}`);
+        if (mod.init) mod.init();
+        const folder = await import(`./folder_integration.js${cacheBust}`);
+        if (folder.initFolderIntegration) folder.initFolderIntegration();
+    </script>
 </body>
 </html>

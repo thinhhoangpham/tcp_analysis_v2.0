@@ -482,6 +482,219 @@ export class AdaptiveOverviewLoader {
     }
 
     /**
+     * Select the appropriate resolution for the flow view, including 10min resolution
+     * @param {number} timeRangeMinutes - Visible time range in minutes
+     * @returns {string} Resolution key
+     */
+    _selectFlowViewResolution(timeRangeMinutes) {
+        if (!this.index) {
+            console.warn('[AdaptiveOverview] Index not loaded, defaulting to hour resolution');
+            return 'hour';
+        }
+
+        const resolutions = this.index.resolutions;
+
+        // Check each resolution in order of granularity (finest first)
+        // Unlike selectResolution(), include 10min resolution
+        for (const [key, config] of Object.entries(resolutions)) {
+            if (config.use_when_range_minutes_lte !== undefined) {
+                if (timeRangeMinutes <= config.use_when_range_minutes_lte) {
+                    return key;
+                }
+            }
+        }
+
+        // Default to coarsest resolution (hour)
+        return 'hour';
+    }
+
+    /**
+     * Get per-IP-pair, per-close-type flow bin items suitable for rendering as flow lozenges.
+     * Unlike getOverviewData(), this returns one item per (pair, bin, closeType, direction)
+     * rather than aggregating across pairs.
+     *
+     * @param {string[]} selectedIPs - Array of selected IP addresses
+     * @param {number} timeStart - Start time in microseconds
+     * @param {number} timeEnd - End time in microseconds
+     * @param {Object} options - Additional options
+     * @param {string} options.resolution - Force a specific resolution (overrides auto-selection)
+     * @returns {Promise<Object>} Object with resolution, binWidthUs, items, globalMaxCount, timeRange
+     */
+    async getFlowBinsByPair(selectedIPs, timeStart, timeEnd, options = {}) {
+        const { resolution: forcedResolution } = options;
+
+        // Calculate time range in minutes
+        const timeRangeUs = timeEnd - timeStart;
+        const timeRangeMinutes = timeRangeUs / 60_000_000;
+
+        // Select resolution — use all resolutions including 10min
+        let resolution;
+        if (forcedResolution && this.index && this.index.resolutions[forcedResolution]) {
+            resolution = forcedResolution;
+            console.log(`[AdaptiveOverview] getFlowBinsByPair using forced resolution: ${resolution}`);
+        } else {
+            resolution = this._selectFlowViewResolution(timeRangeMinutes);
+        }
+
+        // Load resolution data
+        const data = await this.loadResolution(resolution);
+        const config = this.index.resolutions[resolution];
+        const binWidthUs = config.bin_width_us;
+
+        // Build set of selected IP pairs
+        const selectedPairs = this._buildSelectedPairs(selectedIPs);
+
+        // Extract per-pair items
+        const items = this._extractPairItems(data, selectedPairs, timeStart, timeEnd, binWidthUs);
+
+        // Compute globalMaxCount across all items
+        let globalMaxCount = 0;
+        for (const item of items) {
+            if (item.count > globalMaxCount) globalMaxCount = item.count;
+        }
+
+        console.log(`[AdaptiveOverview] getFlowBinsByPair:`, {
+            resolution,
+            selectedIPs: selectedIPs.length,
+            selectedPairs: selectedPairs.size,
+            items: items.length,
+            globalMaxCount,
+            timeRangeMinutes: timeRangeMinutes.toFixed(1)
+        });
+
+        return {
+            resolution,
+            binWidthUs,
+            items,
+            globalMaxCount,
+            timeRange: { start: timeStart, end: timeEnd }
+        };
+    }
+
+    /**
+     * Extract per-IP-pair, per-close-type, per-direction items from resolution data.
+     * Handles v2 array format (primary) and v3 sparse format (fallback, no direction info).
+     * @private
+     */
+    _extractPairItems(data, selectedPairs, timeStart, timeEnd, binWidthUs) {
+        const items = [];
+
+        // v2 array format: [{bin, start, end, flows_by_ip_pair: { pairKey: { graceful, abortive, invalid:{}, ongoing, initiated_by_ip1:{} } }}]
+        if (Array.isArray(data)) {
+            for (const bin of data) {
+                // Skip bins outside the requested time range
+                if (bin.end < timeStart || bin.start > timeEnd) continue;
+
+                const flowsByPair = bin.flows_by_ip_pair;
+                if (!flowsByPair) continue;
+
+                const binCenter = Math.round((bin.start + bin.end) / 2);
+                const aggregateAll = selectedPairs.size === 0;
+
+                for (const [pairKey, pairData] of Object.entries(flowsByPair)) {
+                    if (!aggregateAll && !selectedPairs.has(pairKey)) continue;
+
+                    const [ip1, ip2] = pairKey.split('<->');
+                    const initiatedBy = pairData.initiated_by || {};
+
+                    // Collect all close types and their total counts from this pair/bin
+                    const closeTypeCounts = {};
+
+                    for (const key of ['graceful', 'abortive', 'ongoing', 'open']) {
+                        const total = pairData[key] || 0;
+                        if (total > 0) closeTypeCounts[key] = total;
+                    }
+
+                    if (pairData.invalid && typeof pairData.invalid === 'object') {
+                        for (const [reason, count] of Object.entries(pairData.invalid)) {
+                            if (count > 0) closeTypeCounts[reason] = count;
+                        }
+                    }
+
+                    // Per-close-type time ranges from actual flow data
+                    const ranges = pairData.ranges || {};
+
+                    // Emit per-IP items directly from initiated_by
+                    for (const [closeType, totalCount] of Object.entries(closeTypeCounts)) {
+                        // Use per-close-type range if available, fall back to bin-level
+                        const range = ranges[closeType];
+                        const ctStart = range ? range[0] : bin.start;
+                        const ctEnd = range ? range[1] : bin.end;
+                        const ctCenter = Math.round((ctStart + ctEnd) / 2);
+
+                        for (const [ip, otherIp] of [[ip1, ip2], [ip2, ip1]]) {
+                            const count = (initiatedBy[ip] && initiatedBy[ip][closeType]) || 0;
+                            if (count > 0) {
+                                items.push({
+                                    pairKey,
+                                    initiator: ip,
+                                    responder: otherIp,
+                                    binStart: ctStart,
+                                    binEnd: ctEnd,
+                                    binCenter: ctCenter,
+                                    closeType,
+                                    count,
+                                    binned: true
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort by binStart for consistent ordering
+            items.sort((a, b) => a.binStart - b.binStart);
+        }
+        // v3 sparse format: {meta, pairs: { pairKey: { binIdx: [counts...] } }}
+        // No direction information available — put all flows under ip1 as default
+        else if (data.pairs && data.meta) {
+            const { meta, pairs } = data;
+            const dataTimeStart = meta.time_start;
+            const aggregateAll = selectedPairs.size === 0;
+
+            const startBin = Math.max(0, Math.floor((timeStart - dataTimeStart) / binWidthUs));
+            const endBin = Math.ceil((timeEnd - dataTimeStart) / binWidthUs);
+
+            for (const pairKey of (aggregateAll ? Object.keys(pairs) : selectedPairs)) {
+                const pairData = pairs[pairKey];
+                if (!pairData) continue;
+
+                const [ip1, ip2] = pairKey.split('<->');
+
+                for (const [binIdxStr, counts] of Object.entries(pairData)) {
+                    const binIdx = parseInt(binIdxStr, 10);
+                    if (binIdx < startBin || binIdx > endBin) continue;
+
+                    const binStart = dataTimeStart + binIdx * binWidthUs;
+                    const binEnd = binStart + binWidthUs;
+                    const binCenter = Math.round((binStart + binEnd) / 2);
+
+                    FLOW_COLUMNS.forEach((col, i) => {
+                        const count = counts[i];
+                        if (!count || count <= 0) return;
+                        items.push({
+                            pairKey,
+                            initiator: ip1,
+                            responder: ip2,
+                            binStart,
+                            binEnd,
+                            binCenter,
+                            closeType: col,
+                            count,
+                            binned: true
+                        });
+                    });
+                }
+            }
+
+            // Sort by binStart for consistent ordering
+            items.sort((a, b) => a.binStart - b.binStart);
+        }
+
+        return items;
+    }
+
+    /**
      * Re-bin aggregated data for display when too many bins
      * Uses time-grid-based rebinning to properly handle sparse data
      * @private

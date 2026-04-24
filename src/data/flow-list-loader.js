@@ -17,10 +17,10 @@ const CLOSE_TYPE_DECODING = [
 
 /**
  * Parse the packets column into an array of packet objects
- * Format: delta_ts:flags:dir,...
+ * Format: delta_ts:flags:dir:seq:ack,...
  * dir: 1=ip1->ip2, 0=ip2->ip1 (based on alphabetical IP order from filename)
+ * seq: TCP sequence number, ack: TCP acknowledgment number
  * First packet's dir determines initiator: dir=1 means ip1 initiated, dir=0 means ip2 initiated
- * Note: length, seq, ack not included for now
  *
  * @param {string} packetsString - The packets column value
  * @param {number} flowStartTime - The flow's start time in microseconds
@@ -60,6 +60,8 @@ function parseFlowPackets(packetsString, flowStartTime, ip1, ip2, initiatorPort,
         const delta = parseInt(fields[0], 10) || 0;
         const flags = parseInt(fields[1], 10) || 0;
         const isFromIp1 = fields[2] === '1';
+        const seq_num = fields.length > 3 ? (parseInt(fields[3], 10) || 0) : null;
+        const ack_num = fields.length > 4 ? (parseInt(fields[4], 10) || 0) : null;
 
         // Determine if packet is from initiator
         const isFromInitiator = (initiator === ip1) ? isFromIp1 : !isFromIp1;
@@ -77,10 +79,9 @@ function parseFlowPackets(packetsString, flowStartTime, ip1, ip2, initiatorPort,
             dst_ip: dst_ip,
             src_port: src_port,
             dst_port: dst_port,
-            // length, seq_num, ack_num not included for now
             length: 0,
-            seq_num: null,
-            ack_num: null,
+            seq_num: seq_num,
+            ack_num: ack_num,
             _index: i,
             _fromInitiator: isFromInitiator
         });
@@ -379,6 +380,30 @@ export class FlowListLoader {
         }
 
         return relevantPairs;
+    }
+
+    /**
+     * Get total flow count for a pair without loading data
+     * @param {string} pairKey - IP pair key like "ip1<->ip2"
+     * @returns {number} Total flow count, or 0 if pair not found
+     */
+    getFlowCount(pairKey) {
+        const pairInfo = this.pairsByKey?.get(pairKey);
+        return pairInfo ? pairInfo.totalCount : 0;
+    }
+
+    /**
+     * Get already-loaded flows for a pair within a time range.
+     * Returns null if the pair's flows haven't been loaded yet (caller should load them).
+     * @param {string} pairKey - IP pair key like "ip1<->ip2"
+     * @param {number} startTime - Start time in microseconds
+     * @param {number} endTime - End time in microseconds
+     * @returns {Array|null} Filtered flows, or null if not loaded
+     */
+    getFlowsInRange(pairKey, startTime, endTime) {
+        const pairInfo = this.pairsByKey?.get(pairKey);
+        if (!pairInfo?.loaded || !pairInfo.flows) return null;
+        return pairInfo.flows.filter(f => f.endTime >= startTime && f.startTime <= endTime);
     }
 
     /**
