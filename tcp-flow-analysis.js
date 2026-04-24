@@ -6670,7 +6670,7 @@ function _spawnMagnifierPanel(ipSubset, tMinUs, tMaxUs) {
 async function loadAIOrder() {
     if (_flowOnlyAIOrder) return _flowOnlyAIOrder;
     try {
-        const resp = await fetch('/set1_60min_flows/indices/ip_order.txt');
+        const resp = await fetch(`${DEFAULT_FLOW_DATA_PATH}/indices/ip_order.txt`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const text = await resp.text();
         _flowOnlyAIOrder = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -7136,7 +7136,7 @@ function getVisibleTimeExtent() {
 
 // Default data path for auto-loading
 const DEFAULT_DATA_PATH = 'packets_data/decoded_set1_90min_packets';
-const DEFAULT_FLOW_DATA_PATH = '/set1_60min_flows';
+const DEFAULT_FLOW_DATA_PATH = 'packets_data/set1_60min_flows';
 
 // When the visible time range is <= 90 minutes, load ALL IP pairs (bypass IP selection filter)
 const ALL_IP_PAIRS_TIME_THRESHOLD_US = 90 * 60 * 1_000_000; // 90 minutes in microseconds

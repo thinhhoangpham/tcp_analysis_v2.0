@@ -224,7 +224,14 @@ export class AdaptiveOverviewLoader {
                 throw new Error(`Failed to load ${resolution}: ${response.status}`);
             }
 
-            const data = await response.json();
+            let data;
+            if (filePath.endsWith('.gz')) {
+                const decompressed = response.body.pipeThrough(new DecompressionStream('gzip'));
+                const text = await new Response(decompressed).text();
+                data = JSON.parse(text);
+            } else {
+                data = await response.json();
+            }
             const loadTime = performance.now() - startTime;
 
             console.log(`[AdaptiveOverview] Loaded ${resolution} in ${loadTime.toFixed(0)}ms:`, {

@@ -1,0 +1,46 @@
+{
+  "resolutions": {
+    "1s": {
+      "file": "flow_bins_1s.json.gz",
+      "bin_width_us": 1000000,
+      "bins_with_data": 3258,
+      "bin_width_seconds": 1,
+      "use_when_range_minutes_lte": 10
+    },
+    "10s": {
+      "file": "flow_bins_10s.json.gz",
+      "bin_width_us": 10000000,
+      "bins_with_data": 326,
+      "bin_width_seconds": 10,
+      "use_when_range_minutes_lte": 120
+    },
+    "1min": {
+      "file": "flow_bins_1min.json.gz",
+      "bin_width_us": 60000000,
+      "bins_with_data": 55,
+      "bin_width_minutes": 1,
+      "use_when_range_minutes_lte": 1440
+    },
+    "10min": {
+      "file": "flow_bins_10min.json.gz",
+      "bin_width_us": 600000000,
+      "bins_with_data": 6,
+      "bin_width_minutes": 10,
+      "use_when_range_minutes_lte": 7200
+    },
+    "hour": {
+      "file": "flow_bins_hour.json.gz",
+      "bin_width_us": 3600000000,
+      "bins_with_data": 1,
+      "bin_width_minutes": 60,
+      "use_when_range_minutes_gt": 7200
+    }
+  },
+  "time_range": {
+    "start_us": 1257254615806850,
+    "end_us": 1257257874354590,
+    "duration_minutes": 54
+  },
+  "total_flows": 1827397,
+  "total_ip_pairs": 590622
+}

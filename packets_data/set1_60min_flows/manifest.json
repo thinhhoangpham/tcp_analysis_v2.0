@@ -1,0 +1,34 @@
+{
+  "version": "5.0",
+  "format": "flow_list_csv",
+  "created": "2026-04-17T07:33:45.292944",
+  "status": "in_progress",
+  "source_file": "decoded_set1_90min.csv",
+  "source_files": [
+    "decoded_set1_90min.csv"
+  ],
+  "total_packets": 70000000,
+  "tcp_packets": 69644567,
+  "unique_ips": 18348,
+  "total_flows": 1797902,
+  "total_ip_pairs": 569367,
+  "time_range": {
+    "start": 1257254615805569,
+    "end": 1257257756433100,
+    "duration": 3140627531
+  },
+  "structure": {
+    "flow_list": "indices/flow_list/index.json",
+    "time_bins": "indices/bins.json",
+    "flow_bins_index": "indices/flow_bins_index.json",
+    "ip_stats": "ips/ip_stats.json",
+    "flag_stats": "ips/flag_stats.json",
+    "unique_ips": "ips/unique_ips.json"
+  },
+  "attack_context": null,
+  "filter_applied": {
+    "ips": null,
+    "time_start_us": null,
+    "time_end_us": null
+  }
+}
