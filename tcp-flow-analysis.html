@@ -24,6 +24,13 @@
                     <div id="csvProgressBar" class="csv-progress-bar"></div>
                 </div>
             </div>
+            <!-- Flow processing progress bar (driven by control-panel.js showFlowProgress) -->
+            <div id="flowProgress" style="display: none;">
+                <div id="flowProgressLabel">Loading...</div>
+                <div class="csv-progress-track">
+                    <div id="flowProgressBar" class="csv-progress-bar"></div>
+                </div>
+            </div>
         </div>
         <!-- Packet View bottom overlay: timeline axis + size/flag legends -->
         <div id="chart-bottom-overlay">
@@ -71,8 +78,18 @@
                 <option value="activity_total">Activity volume, total (descending)</option>
                 <option value="activity_initiator">Activity volume, initiator only (descending)</option>
                 <option value="flow_count">Flow count, initiator (descending)</option>
-                <option value="ai">AI (custom order)</option>
+                <option value="ai_live">Hierarchical / Ward</option>
+                <option value="dominant_close">Dominant close-type</option>
+                <option value="burstiness">Burstiness (CV)</option>
+                <option value="fiedler">Spectral / Fiedler</option>
             </select>
+            <label style="display:flex; align-items:center; margin-bottom:6px; font-size:11px; cursor:pointer;">
+                <input type="checkbox" id="groupByRegion" style="margin-right:6px;"> Group rows by AI region
+            </label>
+            <label style="display: flex; align-items: center; margin-bottom: 6px; font-size: 11px; cursor: pointer;">
+                <input type="checkbox" id="showInitiatorsOnly" style="margin-right: 5px;" title="Show only IPs that initiated at least one flow">
+                Initiators only
+            </label>
             <div id="ipSelector" style="border: 1px solid #dee2e6; padding: 7px; background: white; border-radius: 4px;">
                 <div style="margin-bottom: 6px;">
                     <input type="text" id="ipSearch" placeholder="Search IP addresses..." style="width: 100%; padding: 3px 5px; margin-bottom: 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px;">
@@ -159,6 +176,7 @@
                     <div id="groundTruthStats" style="color: #666; font-size: 11px; margin-top: 5px;">
                         Loading ground truth data...
                     </div>
+                    <button id="removeGtIPs" class="cp-btn" style="margin-top: 8px;" title="Uncheck every IP that appears in any ground-truth event (as source or destination)">Remove GT IPs</button>
                 </div>
             </div>
         </div>
@@ -168,6 +186,8 @@
                 <span id="patternBuilderStatus"></span>
             </button>
         </div>
+        <button id="detectAnomaliesBtn" class="cp-btn" title="Ask Claude to find up to 8 anomalous regions in the current overview. Each region appears as a brush rectangle; click one to open a magnifier panel.">Detect anomalies</button>
+        <button id="exportPngBtn" class="cp-btn">Export PNG</button>
         <button id="resetView" class="cp-btn">Reset View</button>
         </div>
       </aside>

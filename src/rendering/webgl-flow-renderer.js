@@ -33,7 +33,15 @@ export class WebGLFlowRenderer {
         this._hoveredIP = null;
         this.showGroundTruth = false;
         this.groundTruthEvents = [];
+        // Per-side wildcard-aware indexes: a band is painted on a row iff that
+        // row's IP is the SPECIFIC (non-wildcard) side of a GT event during the
+        // event's time window.
+        //   - both endpoints specific → paint on both source AND destination rows
+        //   - dst=wildcard            → paint on source row only
+        //   - src=wildcard            → paint on destination row only
+        //   - both wildcard           → skip entirely
         this.gtBySourceIP = new Map();
+        this.gtByDestIP = new Map();
         this.eventColors = {};
 
         // Main WebGL canvas for lozenges
@@ -81,6 +89,10 @@ export class WebGLFlowRenderer {
         this._heightBuf    = this.regl.buffer({ length: 4, usage: 'dynamic' });
         this._colorBuf     = this.regl.buffer({ length: 12, usage: 'dynamic' });
 
+        // markIsCircle = 0: lozenge (rounded rect spanning [timeStart, timeStart+timeWidth] × height)
+        // markIsCircle = 1: circle centred on timeStart, diameter = `height` attribute
+        this.markIsCircle = 0;
+
         this.drawLozenges = this.regl({
             vert: `
                 precision highp float;
@@ -96,6 +108,7 @@ export class WebGLFlowRenderer {
                 uniform float offsetY;
                 uniform vec2 viewport;
                 uniform float minWidth;
+                uniform mediump float markIsCircle;
 
                 varying vec3 vColor;
                 varying vec2 vLocal;
@@ -103,8 +116,15 @@ export class WebGLFlowRenderer {
 
                 void main() {
                     float pxStart = timeStart * scaleX + offsetX;
-                    float pxWidth = max(minWidth, timeWidth * scaleX);
-                    float pxX = pxStart + corner.x * pxWidth;
+                    float pxWidth;
+                    float pxX;
+                    if (markIsCircle > 0.5) {
+                        pxWidth = height;
+                        pxX = pxStart - height * 0.5 + corner.x * height;
+                    } else {
+                        pxWidth = max(minWidth, timeWidth * scaleX);
+                        pxX = pxStart + corner.x * pxWidth;
+                    }
                     float pxY = (yPos + offsetY) - height * 0.5 + corner.y * height;
 
                     float clipX = (pxX / viewport.x) * 2.0 - 1.0;
@@ -121,11 +141,17 @@ export class WebGLFlowRenderer {
                 varying vec3 vColor;
                 varying vec2 vLocal;
                 varying vec2 vHalfSize;
+                uniform mediump float markIsCircle;
 
                 void main() {
-                    float r = min(vHalfSize.y, vHalfSize.x);
-                    vec2 q = abs(vLocal) - (vHalfSize - r);
-                    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+                    float d;
+                    if (markIsCircle > 0.5) {
+                        d = length(vLocal) - vHalfSize.x;
+                    } else {
+                        float r = min(vHalfSize.y, vHalfSize.x);
+                        vec2 q = abs(vLocal) - (vHalfSize - r);
+                        d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+                    }
                     ${this._hasDerivatives
                         ? 'float aa = max(fwidth(d), 0.5); float alpha = 1.0 - smoothstep(-aa, aa, d);'
                         : 'float alpha = d > 0.0 ? 0.0 : 1.0;'}
@@ -146,7 +172,8 @@ export class WebGLFlowRenderer {
                 offsetX:  this.regl.prop('offsetX'),
                 offsetY:  this.regl.prop('offsetY'),
                 viewport: this.regl.prop('viewport'),
-                minWidth: this.regl.prop('minWidth')
+                minWidth: this.regl.prop('minWidth'),
+                markIsCircle: this.regl.prop('markIsCircle')
             },
             count: 4,
             primitive: 'triangle strip',
@@ -157,6 +184,10 @@ export class WebGLFlowRenderer {
             },
             depth: { enable: false }
         });
+    }
+
+    setMarkType(type) {
+        this.markIsCircle = (type === 'circle') ? 1 : 0;
     }
 
     setLayout(ipOrder, ipPositions, rowGap) {
@@ -171,10 +202,21 @@ export class WebGLFlowRenderer {
         this.groundTruthEvents = events || [];
         this.eventColors = eventColors || {};
         this.gtBySourceIP = new Map();
+        this.gtByDestIP = new Map();
+        const WILDCARD = '255.255.255.255';
         for (const evt of this.groundTruthEvents) {
-            if (!evt.source) continue;
-            if (!this.gtBySourceIP.has(evt.source)) this.gtBySourceIP.set(evt.source, []);
-            this.gtBySourceIP.get(evt.source).push(evt);
+            if (!evt.source || !evt.destination) continue;
+            const srcWild = evt.source === WILDCARD;
+            const dstWild = evt.destination === WILDCARD;
+            if (srcWild && dstWild) continue;
+            if (!srcWild) {
+                if (!this.gtBySourceIP.has(evt.source)) this.gtBySourceIP.set(evt.source, []);
+                this.gtBySourceIP.get(evt.source).push(evt);
+            }
+            if (!dstWild) {
+                if (!this.gtByDestIP.has(evt.destination)) this.gtByDestIP.set(evt.destination, []);
+                this.gtByDestIP.get(evt.destination).push(evt);
+            }
         }
     }
 
@@ -182,19 +224,27 @@ export class WebGLFlowRenderer {
         this.showGroundTruth = !!show;
     }
 
-    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20 } = {}) {
-        console.log('[WebGLRenderer] setData called with', items?.length || 0, 'items');
+    setData(items, colorMap, hScale, { minHeight = 4, maxHeight = 20, skipHitIndex = false } = {}) {
+        console.log('[WebGLRenderer] setData called with', items?.length || 0, 'items', skipHitIndex ? '(skipHitIndex)' : '');
         this.colorMap = colorMap;
         this.hScale = hScale;
         this.minHeight = minHeight;
         this.maxHeight = maxHeight;
 
-        this.itemsByIP = new Map();
-        for (const d of items) {
-            const ip = d.initiator || d.src_ip;
-            if (!ip) continue;
-            if (!this.itemsByIP.has(ip)) this.itemsByIP.set(ip, []);
-            this.itemsByIP.get(ip).push(d);
+        // itemsByIP only feeds the hit-test path (hover). For 8M-item packet
+        // overviews this Map alone is several hundred MB and dominates the
+        // setData wall-clock — callers that don't need hover hit-testing pass
+        // skipHitIndex:true.
+        if (skipHitIndex) {
+            this.itemsByIP = new Map();
+        } else {
+            this.itemsByIP = new Map();
+            for (const d of items) {
+                const ip = d.initiator || d.src_ip;
+                if (!ip) continue;
+                if (!this.itemsByIP.has(ip)) this.itemsByIP.set(ip, []);
+                this.itemsByIP.get(ip).push(d);
+            }
         }
         this.items = items;
         this._rebuildBuffers();
@@ -334,6 +384,7 @@ export class WebGLFlowRenderer {
                     offsetY,
                     viewport: [fullWidth, ch],
                     minWidth: 4,
+                    markIsCircle: this.markIsCircle ? 1 : 0,
                     instances: this.instanceCount
                 });
                 if (!this._drawLogged) {
@@ -363,23 +414,30 @@ export class WebGLFlowRenderer {
         const yMin = scrollTop - marginTop - this.rowGap;
         const yMax = scrollTop - marginTop + viewportHeight + this.rowGap;
 
-        // Ground truth overlay
-        if (this.showGroundTruth && this.gtBySourceIP && xScale) {
+        // Ground truth overlay. Per-side wildcard-aware: paint a band on a
+        // row iff that row's IP appears as the SPECIFIC side of an event —
+        // i.e. on the source row if evt.source isn't wildcard, on the dest
+        // row if evt.destination isn't wildcard. Both-specific events thus
+        // paint on both rows; wildcard sides are skipped.
+        if (this.showGroundTruth && xScale && (this.gtBySourceIP || this.gtByDestIP)) {
             ctx.globalAlpha = 0.25;
             for (const ip of this.ipOrder) {
                 const yPos = this.ipPositions?.get(ip);
                 if (yPos === undefined || yPos < yMin || yPos > yMax) continue;
-                const events = this.gtBySourceIP.get(ip);
-                if (!events) continue;
+                const srcEvents = this.gtBySourceIP && this.gtBySourceIP.get(ip);
+                const dstEvents = this.gtByDestIP && this.gtByDestIP.get(ip);
+                if (!srcEvents && !dstEvents) continue;
                 const screenY = yPos + marginTop - scrollTop;
-                for (const evt of events) {
+                const paint = (evt) => {
                     const x1 = xScale(evt.startTimeMicroseconds);
                     const x2 = xScale(evt.stopTimeMicroseconds || evt.startTimeMicroseconds);
                     const x = Math.min(x1, x2) + marginLeft;
                     const w = Math.max(3, Math.abs(x2 - x1));
                     ctx.fillStyle = this.eventColors[evt.eventType] || '#888';
                     ctx.fillRect(x, screenY - this.rowGap / 2, w, this.rowGap);
-                }
+                };
+                if (srcEvents) for (const evt of srcEvents) paint(evt);
+                if (dstEvents) for (const evt of dstEvents) paint(evt);
             }
             ctx.globalAlpha = 1.0;
         }

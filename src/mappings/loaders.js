@@ -36,6 +36,32 @@ export async function loadIpMap(path = './full_ip_map.json') {
 }
 
 /**
+ * Load IP→{country, org} metadata map (from MaxMind GeoLite2 enrichment).
+ * Returns the raw object keyed by IP, or null on failure.
+ * Strips RFC1918 entries to keep the in-memory map small — the layout's
+ * `internal` level handles those independently.
+ */
+export async function loadIpMetaMap(path = './ip_meta_map.json') {
+  try {
+    const obj = await loadJson(path);
+    const out = {};
+    let kept = 0, skipped = 0;
+    for (const [ip, meta] of Object.entries(obj)) {
+      if (meta && meta.internal) { skipped++; continue; }
+      if (meta && (meta.country || meta.org)) {
+        out[ip] = { country: meta.country || null, org: meta.org || null };
+        kept++;
+      }
+    }
+    console.log(`IP meta map loaded: ${kept} entries (skipped ${skipped} internal)`);
+    return out;
+  } catch (err) {
+    console.warn('Failed to load IP meta map:', err);
+    return null;
+  }
+}
+
+/**
  * Load event type mapping.
  * @param {string} path - Path to event type mapping JSON file
  * @returns {Promise<Map<number, string>|null>} Map from ID to event name, or null on failure
@@ -120,12 +146,13 @@ export async function loadAttackGroupMap(path = './attack_group_mapping.json') {
  * @returns {Promise<Object>} Object containing all loaded mappings
  */
 export async function loadAllMappings(canonicalize) {
-  const [ipMap, eventMap, colorMap, groupMap, groupColorMap] = await Promise.all([
+  const [ipMap, eventMap, colorMap, groupMap, groupColorMap, ipMetaMap] = await Promise.all([
     loadIpMap(),
     loadEventTypeMap(),
     loadColorMapping('./color_mapping.json', canonicalize),
     loadAttackGroupMap(),
     loadColorMapping('./attack_group_color_mapping.json', canonicalize),
+    loadIpMetaMap(),
   ]);
 
   return {
@@ -136,5 +163,6 @@ export async function loadAllMappings(canonicalize) {
     attackGroupIdToName: groupMap,
     colorByAttackGroup: groupColorMap.canonical,
     rawColorByAttackGroup: groupColorMap.raw,
+    ipMetaMap,
   };
 }
