@@ -5069,6 +5069,7 @@ function visualizeTimeArcs(packets) {
             ipRowHeights: state.layout.ipRowHeights,
             subRowHeights: state.layout.subRowHeights,
             subRowOffsets: state.layout.subRowOffsets,
+            originIPs: state.neighbors.originIPs,
             onToggleCollapse: (ip) => {
                 if (state.layout.collapsedIPs.has(ip)) {
                     state.layout.collapsedIPs.delete(ip);
