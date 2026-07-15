@@ -5692,6 +5692,8 @@ function checkForBrushSelectionData() {
             // This will be used to pre-select IPs when data is loaded
             window.brushSelectionPrefilterIPs = brushSelectionData.selection.ips;
             console.log('Pre-filter IPs set:', window.brushSelectionPrefilterIPs.length);
+            // Origin IPs (brushed) drive the ● marker and neighbor expansion
+            state.neighbors.originIPs = new Set(brushSelectionData.selection.ips);
         }
 
         // Store ordered IPs from TimeArcs (if available) for vertical ordering
