@@ -9,6 +9,16 @@ attacks_in_minutes_timearcs/
 packets_data/*
 !packets_data/attack_packets_day1to5/
 !packets_data/attack_flows_day1to5/
+!packets_data/decoded_set1_90min_packets/
+!packets_data/flows_set1_90min/
+
+# Oversized plain flow-bin JSON (>100MB, GitHub-blocked) — committed as .json.gz instead;
+# plain .json kept on disk locally as backup but never committed.
+packets_data/flows_set1_90min/indices/flow_bins_1s.json
+packets_data/flows_set1_90min/indices/flow_bins_10s.json
+packets_data/flows_set1_90min/indices/flow_bins_1min.json
+packets_data/flows_set1_90min/indices/flow_bins_10min.json
+packets_data/flows_set1_90min/indices/flow_bins_hour.json
 
 # Exclude large flow chunk data (12GB) - keep pairs_meta.json for metadata
 packets_data/attack_flows_day1to5/flows/by_pair/
