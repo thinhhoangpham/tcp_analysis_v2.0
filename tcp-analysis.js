@@ -1315,6 +1315,47 @@ function initializeBarVisualization() {
                 drawAutoFlowThreading(visible);
             }
         },
+        onToggleAddNeighbors: async (checked) => {
+            state.neighbors.enabled = checked;
+
+            // Determine currently-checked IPs (the current selection)
+            const currentlySelected = new Set(
+                Array.from(document.querySelectorAll('#ipCheckboxes input[type=checkbox]:checked')).map(cb => cb.value)
+            );
+
+            // Origin IPs: if none were seeded from a brush (standalone open),
+            // treat the current selection as the origin set.
+            if (state.neighbors.originIPs.size === 0 && currentlySelected.size > 0) {
+                state.neighbors.originIPs = new Set(currentlySelected);
+            }
+
+            if (checked) {
+                // Time scope: brushed window if present, else full span (null = no clip)
+                const timeExtent = state.timearcs.overviewTimeExtent || null;
+                const neighbors = computeFirstDegreeNeighbors(state.neighbors.originIPs, {
+                    topN: 50,
+                    timeExtent,
+                    excludeIPs: currentlySelected
+                });
+                state.neighbors.addedIPs = new Set(neighbors);
+                // Check the neighbor IP boxes
+                for (const ip of neighbors) {
+                    const cb = document.querySelector(`#ipCheckboxes input[value="${ip}"]`);
+                    if (cb && !cb.checked) cb.checked = true;
+                }
+                console.log(`[neighbors] Added ${neighbors.length} first-degree neighbors (topN=50, scope=${timeExtent ? 'brush window' : 'full span'})`);
+            } else {
+                // Remove exactly the feature-added IPs
+                for (const ip of state.neighbors.addedIPs) {
+                    const cb = document.querySelector(`#ipCheckboxes input[value="${ip}"]`);
+                    if (cb && cb.checked) cb.checked = false;
+                }
+                console.log(`[neighbors] Removed ${state.neighbors.addedIPs.size} added neighbors`);
+                state.neighbors.addedIPs = new Set();
+            }
+
+            await updateIPFilter();
+        },
         onToggleBinning: (checked) => {
             state.ui.useBinning = checked;
             const savedDomain = xScale ? xScale.domain().slice() : null;
