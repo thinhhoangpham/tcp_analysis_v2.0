@@ -1,0 +1,64 @@
+{
+  "version": "3.5",
+  "format": "multires_packets",
+  "created": "2026-04-28T18:35:17.598488",
+  "source_file": "decoded_set1_90min.csv",
+  "total_packets": 125682278,
+  "unique_ips": 19666,
+  "target_chunk_mb": 50.0,
+  "time_range": {
+    "start": 1257254615805569,
+    "end": 1257260015804551,
+    "duration": 5399998982
+  },
+  "resolutions": {
+    "hours": {
+      "resolution_microseconds": 3600000000,
+      "total_bins": 8001050,
+      "total_chunks": 1,
+      "index": "resolutions/hours/index.json"
+    },
+    "minutes": {
+      "resolution_microseconds": 60000000,
+      "total_bins": 8202859,
+      "total_chunks": 1,
+      "index": "resolutions/minutes/index.json"
+    },
+    "10s": {
+      "resolution_microseconds": 10000000,
+      "total_bins": 8432999,
+      "total_chunks": 2,
+      "index": "resolutions/10s/index.json"
+    },
+    "seconds": {
+      "resolution_microseconds": 1000000,
+      "total_bins": 8900001,
+      "total_chunks": 2,
+      "index": "resolutions/seconds/index.json"
+    },
+    "100ms": {
+      "resolution_microseconds": 100000,
+      "total_bins": 9735469,
+      "total_chunks": 2,
+      "index": "resolutions/100ms/index.json"
+    },
+    "10ms": {
+      "resolution_microseconds": 10000,
+      "total_bins": 11203124,
+      "total_chunks": 2,
+      "index": "resolutions/10ms/index.json"
+    },
+    "1ms": {
+      "resolution_microseconds": 1000,
+      "total_bins": 20011885,
+      "total_chunks": 4,
+      "index": "resolutions/1ms/index.json"
+    },
+    "raw": {
+      "resolution_microseconds": 1,
+      "total_packets": 125682278,
+      "total_chunks": 20,
+      "index": "resolutions/raw/index.json"
+    }
+  }
+}
