@@ -6934,7 +6934,7 @@ function getVisibleTimeExtent() {
 
 // Default data path for auto-loading
 const DEFAULT_DATA_PATH = 'packets_data/decoded_set1_90min_packets';
-const DEFAULT_FLOW_DATA_PATH = 'packets_data/set1_30min_flows';
+const DEFAULT_FLOW_DATA_PATH = 'packets_data/flows_set1_90min';
 
 // When the visible time range is <= 90 minutes, load ALL IP pairs (bypass IP selection filter)
 const ALL_IP_PAIRS_TIME_THRESHOLD_US = 90 * 60 * 1_000_000; // 90 minutes in microseconds

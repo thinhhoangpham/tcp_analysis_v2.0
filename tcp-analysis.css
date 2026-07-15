@@ -338,6 +338,11 @@ label {
     opacity: 1;
 }
 
+/* Flow lozenge styles */
+.flow-lozenge { opacity: 0.7; }
+.flow-lozenge.highlighted { opacity: 1; }
+.flow-lozenge.faded { opacity: 0.1; }
+
 /* TCP Flow Styles - Lines removed, only using for packet filtering */
 
 /* Flow List Styles */

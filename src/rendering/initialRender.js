@@ -73,35 +73,39 @@ export function prepareInitialRenderData(options) {
         });
     }
 
-    // Add y positions to data (data is always pre-binned from multi-resolution system)
-    const binnedPackets = initialVisiblePackets.map(d => ({
-        ...d,
-        yPos: findIPPosition(
-            d.src_ip,
-            d.src_ip,
-            d.dst_ip,
-            state.layout.pairs,
-            state.layout.ipPositions
-        ),
-        binCenter: d.bin_start
-            ? (d.bin_start + (d.bin_end - d.bin_start) / 2)
-            : d.timestamp,
-        flagType: d.flagType || d.flag_type || 'OTHER',
-        binned: d.binned !== false,
-        count: d.count || 1,
-        originalPackets: d.originalPackets || [d]
-    }));
-
-    // Compute globalMaxBinCount from binned data
+    // Add y positions to data (data is always pre-binned from multi-resolution system).
+    // NOTE: explicit field assignment instead of `{...d}` spread. At 8M+ items the
+    // spread-copy allocates a new object per item, doubles memory, and blows the heap.
+    // Also DROP `originalPackets: [d]` — that line used to allocate a single-element
+    // array per item (8M arrays, ~660 MB pure overhead) and nothing reads it on the
+    // binned path anyway.
+    const n = initialVisiblePackets.length;
+    const binnedPackets = new Array(n);
     let globalMaxBinCount = 1;
-    try {
-        const counts = binnedPackets
-            .filter(d => d.binned && d.count > 0)
-            .map(d => d.count);
-        const maxCount = counts.length > 0 ? Math.max(...counts) : 1;
-        globalMaxBinCount = Math.max(1, maxCount);
-    } catch (_) {
-        globalMaxBinCount = 1;
+    const pairs = state.layout.pairs;
+    const ipPositions = state.layout.ipPositions;
+    for (let i = 0; i < n; i++) {
+        const d = initialVisiblePackets[i];
+        const count = d.count || 1;
+        if (count > globalMaxBinCount) globalMaxBinCount = count;
+        binnedPackets[i] = {
+            src_ip: d.src_ip,
+            dst_ip: d.dst_ip,
+            src_port: d.src_port,
+            dst_port: d.dst_port,
+            timestamp: d.timestamp,
+            bin_start: d.bin_start,
+            bin_end: d.bin_end,
+            flag_type: d.flag_type,
+            total_bytes: d.total_bytes,
+            yPos: findIPPosition(d.src_ip, d.src_ip, d.dst_ip, pairs, ipPositions),
+            binCenter: d.bin_start != null
+                ? (d.bin_start + (d.bin_end - d.bin_start) / 2)
+                : d.timestamp,
+            flagType: d.flagType || d.flag_type || 'OTHER',
+            binned: d.binned !== false,
+            count
+        };
     }
 
     // Sort by flag type (most common first) then timestamp
@@ -114,8 +118,8 @@ export function prepareInitialRenderData(options) {
     };
 
     binnedPackets.sort((a, b) => {
-        const flagA = getFlagType(a);
-        const flagB = getFlagType(b);
+        const flagA = a.flagType;
+        const flagB = b.flagType;
         const countA = getCount(flagA);
         const countB = getCount(flagB);
         if (countA !== countB) return countB - countA;
@@ -128,6 +132,37 @@ export function prepareInitialRenderData(options) {
         resolution: initialResolution,
         visibleRangeUs: initialVisibleRangeUs
     };
+}
+
+/**
+ * Prepare flow bin data for the lozenge renderer.
+ * Parallel to prepareInitialRenderData but for flow view mode.
+ *
+ * @param {Object} options
+ * @param {Array} options.flowItems - Items from AdaptiveOverviewLoader.getFlowBinsByPair()
+ * @param {number} options.globalMaxCount - Max count across all items
+ * @param {Function} options.findIPPosition - function(ip) => yPos
+ * @param {Object} options.state - Global state object
+ * @returns {Object} { binnedFlows, globalMaxCount }
+ */
+export function prepareFlowRenderData({ flowItems, globalMaxCount, findIPPosition, state }) {
+    if (!flowItems || flowItems.length === 0) {
+        return { binnedFlows: [], globalMaxCount: 0 };
+    }
+
+    const selectedIPSet = new Set();
+    document.querySelectorAll('#ipCheckboxes input[type="checkbox"]:checked')
+        .forEach(cb => selectedIPSet.add(cb.value));
+
+    // Filter to only items where both IPs are selected and add yPos
+    const binnedFlows = flowItems
+        .filter(d => selectedIPSet.has(d.initiator) && selectedIPSet.has(d.responder))
+        .map(d => ({
+            ...d,
+            yPos: findIPPosition(d.initiator)
+        }));
+
+    return { binnedFlows, globalMaxCount };
 }
 
 /**

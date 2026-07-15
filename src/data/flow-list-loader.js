@@ -17,10 +17,10 @@ const CLOSE_TYPE_DECODING = [
 
 /**
  * Parse the packets column into an array of packet objects
- * Format: delta_ts:flags:dir,...
+ * Format: delta_ts:flags:dir:seq:ack,...
  * dir: 1=ip1->ip2, 0=ip2->ip1 (based on alphabetical IP order from filename)
+ * seq: TCP sequence number, ack: TCP acknowledgment number
  * First packet's dir determines initiator: dir=1 means ip1 initiated, dir=0 means ip2 initiated
- * Note: length, seq, ack not included for now
  *
  * @param {string} packetsString - The packets column value
  * @param {number} flowStartTime - The flow's start time in microseconds
@@ -60,6 +60,8 @@ function parseFlowPackets(packetsString, flowStartTime, ip1, ip2, initiatorPort,
         const delta = parseInt(fields[0], 10) || 0;
         const flags = parseInt(fields[1], 10) || 0;
         const isFromIp1 = fields[2] === '1';
+        const seq_num = fields.length > 3 ? (parseInt(fields[3], 10) || 0) : null;
+        const ack_num = fields.length > 4 ? (parseInt(fields[4], 10) || 0) : null;
 
         // Determine if packet is from initiator
         const isFromInitiator = (initiator === ip1) ? isFromIp1 : !isFromIp1;
@@ -77,16 +79,71 @@ function parseFlowPackets(packetsString, flowStartTime, ip1, ip2, initiatorPort,
             dst_ip: dst_ip,
             src_port: src_port,
             dst_port: dst_port,
-            // length, seq_num, ack_num not included for now
             length: 0,
-            seq_num: null,
-            ack_num: null,
+            seq_num: seq_num,
+            ack_num: ack_num,
             _index: i,
             _fromInitiator: isFromInitiator
         });
     }
 
     return { packets, initiator, responder };
+}
+
+/**
+ * Build a flow object from a v6 sharded-Parquet row.
+ * Columns: ip1, ip2, start_time, src_port, dst_port, close_type, packets
+ * ip1/ip2 come from the row itself (already in alphabetical order, matching
+ * the convention parseFlowPackets expects).
+ * @param {Object} row - Parquet row { ip1, ip2, start_time, src_port, dst_port, close_type, packets }
+ * @param {number} index - Index for synthetic flow id
+ */
+function parseFlowFromParquetRow(row, index) {
+    const ip1 = String(row.ip1 || '');
+    const ip2 = String(row.ip2 || '');
+    const startTime = Number(row.start_time) || 0;
+    const initiatorPort = Number(row.src_port) || 0;
+    const responderPort = Number(row.dst_port) || 0;
+    const packetsStr = row.packets || '';
+    const closeTypeCode = Number(row.close_type) || 0;
+
+    const parseResult = packetsStr
+        ? parseFlowPackets(packetsStr, startTime, ip1, ip2, initiatorPort, responderPort)
+        : { packets: [], initiator: ip1, responder: ip2 };
+
+    const embeddedPackets = parseResult.packets;
+    const initiator = parseResult.initiator;
+    const responder = parseResult.responder;
+
+    const endTime = embeddedPackets.length > 0
+        ? embeddedPackets[embeddedPackets.length - 1].timestamp
+        : startTime;
+    const totalBytes = embeddedPackets.length > 0
+        ? embeddedPackets.reduce((sum, pkt) => sum + (pkt.length || 0), 0)
+        : 0;
+
+    const closeTypeStr = CLOSE_TYPE_DECODING[closeTypeCode] || '';
+    const isInvalid = closeTypeCode >= 4;
+    const closeTypeValue = isInvalid ? 'invalid' : closeTypeStr;
+    const invalidReason = isInvalid ? closeTypeStr : '';
+
+    return {
+        id: index,
+        initiator: initiator,
+        responder: responder,
+        startTime: startTime,
+        endTime: endTime,
+        totalPackets: embeddedPackets.length,
+        initiatorPort: initiatorPort,
+        responderPort: responderPort,
+        closeType: closeTypeValue,
+        invalidReason: invalidReason,
+        totalBytes: totalBytes,
+        state: isInvalid ? 'invalid' : (closeTypeStr ? 'closed' : 'unknown'),
+        establishmentComplete: closeTypeValue === 'graceful' || closeTypeValue === 'abortive',
+        _embeddedPackets: embeddedPackets,
+        _hasEmbeddedPackets: embeddedPackets.length > 0
+    };
 }
 
 /**
@@ -215,12 +272,18 @@ function parseFlowCSV(csvText, ip1, ip2) {
 export class FlowListLoader {
     constructor() {
         this.index = null;
-        this.pairsByKey = null;  // Map of ip_pair -> { file, count, loaded, flows }
+        // For v1.2 (per-pair CSV): pairsByKey is Map of pair -> { files: [], totalCount, loaded, flows }
+        // For v2.0 (sharded Parquet): pairsByKey is Map of pair -> { shards: [{shard,row_start,count}], totalCount, loaded, flows, isShardFormat: true }
+        this.pairsByKey = null;
         this.metadata = null;
         this.basePath = null;
         this.loaded = false;
         this.loading = false;
         this.loadPromise = null;
+        // v2.0: cache decoded shard rows (Map<shardIndex, Promise<rowArray>>)
+        // Each shard is fetched + decoded once, then reused for every pair that lives in it.
+        this._shardCache = null;
+        this._isShardFormat = false;
     }
 
     /**
@@ -272,7 +335,38 @@ export class FlowListLoader {
                 timeRange: this.index.time_range
             };
 
-            // Build lookup by IP pair, grouping split files
+            this._isShardFormat = this.index.format === 'flow_shards_parquet';
+
+            if (this._isShardFormat) {
+                // v2.0 sharded Parquet index. `index.pairs` is an object:
+                //   { "ip1<->ip2": { count, shards: [{shard, row_start, count}, ...] }, ... }
+                this.pairsByKey = new Map();
+                this._shardCache = new Map();
+
+                const pairs = this.index.pairs || {};
+                for (const [pairKey, pairData] of Object.entries(pairs)) {
+                    this.pairsByKey.set(pairKey, {
+                        shards: pairData.shards || [],
+                        totalCount: pairData.count || 0,
+                        loaded: false,
+                        flows: null,
+                        isShardFormat: true
+                    });
+                }
+
+                const hasPacketsColumn = this.index.columns && this.index.columns.includes('packets');
+                console.log(`[FlowListLoader] Index loaded from ${url} (sharded Parquet, v${this.index.version})`);
+                console.log(`[FlowListLoader]   ${this.pairsByKey.size} IP pairs, `
+                    + `${this.index.total_flows.toLocaleString()} total flows, `
+                    + `${this.index.total_shards} shards`);
+                if (hasPacketsColumn) {
+                    console.log(`[FlowListLoader] ✓ packets column detected - embedded packet data available for visualization`);
+                }
+                this.loaded = true;
+                return true;
+            }
+
+            // v1.x per-pair CSV index. `index.pairs` is an array of {pair, file, count, part?, total_parts?}.
             this.pairsByKey = new Map();
             let splitPairsCount = 0;
 
@@ -382,6 +476,122 @@ export class FlowListLoader {
     }
 
     /**
+     * Get total flow count for a pair without loading data
+     * @param {string} pairKey - IP pair key like "ip1<->ip2"
+     * @returns {number} Total flow count, or 0 if pair not found
+     */
+    getFlowCount(pairKey) {
+        const pairInfo = this.pairsByKey?.get(pairKey);
+        return pairInfo ? pairInfo.totalCount : 0;
+    }
+
+    /**
+     * Get already-loaded flows for a pair within a time range.
+     * Returns null if the pair's flows haven't been loaded yet (caller should load them).
+     * @param {string} pairKey - IP pair key like "ip1<->ip2"
+     * @param {number} startTime - Start time in microseconds
+     * @param {number} endTime - End time in microseconds
+     * @returns {Array|null} Filtered flows, or null if not loaded
+     */
+    getFlowsInRange(pairKey, startTime, endTime) {
+        const pairInfo = this.pairsByKey?.get(pairKey);
+        if (!pairInfo?.loaded || !pairInfo.flows) return null;
+        return pairInfo.flows.filter(f => f.endTime >= startTime && f.startTime <= endTime);
+    }
+
+    /**
+     * Lazy-load and cache the hyparquet module (ESM from CDN).
+     * The dynamic import keeps the dependency cost zero unless v6 sharded
+     * Parquet data is actually loaded.
+     */
+    async _getHyparquet() {
+        if (!this._hyparquetPromise) {
+            // Pure-JS Parquet reader. esm.sh bundles the multi-file source
+            // into a single self-contained ESM, so we don't have to worry
+            // about resolving relative imports from a CDN (jsdelivr serves
+            // files raw and the package's bundled `hyparquet.min.js` entry
+            // is missing helpers like asyncBufferFromFile). Pinned to v1.25
+            // for reproducibility.
+            this._hyparquetPromise = import('https://esm.sh/hyparquet@1.25.6');
+        }
+        return this._hyparquetPromise;
+    }
+
+    /**
+     * Fetch and decode a single Parquet shard. Cached per shard index so
+     * multiple pairs that live in the same shard share one download/decode.
+     * @param {number} shardIdx - Index into this.index.shards
+     * @returns {Promise<Object[]>} Array of row objects keyed by column name.
+     */
+    async _loadShard(shardIdx) {
+        if (this._shardCache.has(shardIdx)) {
+            return this._shardCache.get(shardIdx);
+        }
+        const filename = this.index.shards[shardIdx];
+        if (!filename) {
+            const empty = Promise.resolve([]);
+            this._shardCache.set(shardIdx, empty);
+            return empty;
+        }
+        const url = `${this.flowListPath}/${filename}`;
+        const promise = (async () => {
+            const hp = await this._getHyparquet();
+            const t0 = performance.now();
+            // Download the full shard once and feed it to hyparquet as an
+            // ArrayBuffer. Avoids depending on HTTP Range support (e.g.,
+            // Python's http.server returns 200 with the full body for any
+            // Range header, which would defeat hyparquet's range reader).
+            // Decoded rows are cached in this._shardCache so the 50 MB
+            // download happens at most once per shard per session.
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status} for ${url}`);
+            }
+            const arrayBuffer = await response.arrayBuffer();
+            const rows = await hp.parquetReadObjects({ file: arrayBuffer });
+            const dt = (performance.now() - t0).toFixed(0);
+            const mb = (arrayBuffer.byteLength / 1048576).toFixed(1);
+            console.log(`[FlowListLoader]   Loaded shard ${filename}: `
+                + `${rows.length.toLocaleString()} rows (${mb} MB) in ${dt}ms`);
+            return rows;
+        })();
+        this._shardCache.set(shardIdx, promise);
+        return promise;
+    }
+
+    /**
+     * Load all flows for a pair stored in the v2.0 sharded Parquet format.
+     * Reads each (shard, row_start, count) range, slices the cached rows,
+     * and parses them into flow objects.
+     */
+    async _loadPairFlowsFromShards(pairKey, pairInfo) {
+        const allFlows = [];
+        let idCounter = 0;
+
+        for (const range of pairInfo.shards) {
+            const rows = await this._loadShard(range.shard);
+            const start = Number(range.row_start) || 0;
+            const count = Number(range.count) || 0;
+            const end = Math.min(start + count, rows.length);
+            for (let i = start; i < end; i++) {
+                allFlows.push(parseFlowFromParquetRow(rows[i], idCounter++));
+            }
+        }
+
+        pairInfo.loaded = true;
+        pairInfo.flows = allFlows;
+
+        const flowsWithPackets = allFlows.filter(f => f._hasEmbeddedPackets).length;
+        const totalPackets = allFlows.reduce((sum, f) => sum + (f._embeddedPackets?.length || 0), 0);
+        const shardDesc = pairInfo.shards.length === 1
+            ? `shard ${pairInfo.shards[0].shard}`
+            : `${pairInfo.shards.length} shards`;
+        console.log(`[FlowListLoader] ✓ Loaded ${allFlows.length} flows for ${pairKey} from ${shardDesc} `
+            + `(${flowsWithPackets} with embedded packets, ${totalPackets} total packets)`);
+        return allFlows;
+    }
+
+    /**
      * Load flows for a specific IP pair (handles split files)
      * @param {string} pairKey - IP pair key like "ip1<->ip2" (alphabetically sorted)
      * @returns {Promise<Array>} Array of flow objects
@@ -393,6 +603,11 @@ export class FlowListLoader {
         // Return cached if already loaded
         if (pairInfo.loaded && pairInfo.flows) {
             return pairInfo.flows;
+        }
+
+        // v2.0: route to the sharded Parquet loader.
+        if (pairInfo.isShardFormat) {
+            return this._loadPairFlowsFromShards(pairKey, pairInfo);
         }
 
         // Extract IPs from pair key (format: "ip1<->ip2" where ip1 < ip2)

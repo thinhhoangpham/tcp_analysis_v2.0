@@ -1036,14 +1036,15 @@ export function createOverviewFromAdaptive(adaptiveData, { timeExtent, width, ma
     const sharedMax = Math.max(1, maxTotal);
 
     // Build segments for rendering
+    const binWidthUs = adaptiveData.binWidthUs || (adaptiveData.bins[0] ? adaptiveData.bins[0].end - adaptiveData.bins[0].start : 0);
     const segments = [];
     for (const bin of adaptiveData.bins) {
         // Skip bins outside the visible time extent
-        if (bin.end < timeExtent[0] || bin.start > timeExtent[1]) continue;
+        if (bin.start + binWidthUs < timeExtent[0] || bin.start > timeExtent[1]) continue;
 
-        // Clamp bin positions to the time extent
+        // Clamp bin positions to the time extent using fixed resolution bin width
         const x0 = overviewXScale(Math.max(bin.start, timeExtent[0]));
-        const x1 = overviewXScale(Math.min(bin.end, timeExtent[1]));
+        const x1 = overviewXScale(Math.min(bin.start + binWidthUs, timeExtent[1]));
         const widthPx = Math.max(1, x1 - x0);
         const baseX = x0;
 

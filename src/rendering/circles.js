@@ -146,30 +146,33 @@ export function renderCircles(layer, binned, options) {
         return baseY + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
     };
 
-    // Ensure each item has yPos and calculate offset
-    const processed = items.map((d, idx) => {
+    // Ensure each item has yPos and calculate offset.
+    // NOTE: mutating items in place rather than spread-copying. Spread-copy at this
+    // scale (millions of packet bins) allocates a full object duplicate per item,
+    // which doubles memory and OOMs the heap. Mutation is safe here because `items`
+    // is the binnedPackets array built in prepareInitialRenderData — a throwaway
+    // working copy, not a shared reference to state.data.*.
+    const processed = items;
+    const emptyPairInfo = { order: new Map(), count: 1 };
+    for (let i = 0; i < processed.length; i++) {
+        const d = processed[i];
         const yPos = d.yPos !== undefined ? d.yPos : findIPPosition(d.src_ip, d.src_ip, d.dst_ip, pairs, ipPositions);
-        // Preserve '__collapsed__' sentinel from collapseSubRowsBins so highlighting works
         const ipPairKey = d.ipPairKey === '__collapsed__' ? '__collapsed__' : makeIpPairKey(d.src_ip, d.dst_ip);
-        const pairInfo = ipPairOrderByRow.get(yPos) || { order: new Map(), count: 1 };
+        const pairInfo = ipPairOrderByRow.get(yPos) || emptyPairInfo;
         const pairIndex = pairInfo.order.get(ipPairKey) || 0;
 
-        // First pair (pairIndex 0) aligns with baseline (yPos) where label is
-        // Subsequent pairs grow DOWNWARD from there
-        // Use precomputed per-sub-row offset (variable heights) when available
         const offsetKey = `${d.src_ip}|${ipPairKey}`;
         const offset = subRowOffsets && subRowOffsets.get(offsetKey);
         const pairCenterY = yPos + (offset ?? pairIndex * (SUB_ROW_HEIGHT + SUB_ROW_GAP));
 
-        return {
-            ...d,
-            yPos,
-            yPosWithOffset: pairCenterY,
-            ipPairKey,
-            ipPairs: d.ipPairs || [{ src_ip: d.src_ip, dst_ip: d.dst_ip, count: d.count || 1 }],
-            _idx: idx
-        };
-    });
+        d.yPos = yPos;
+        d.yPosWithOffset = pairCenterY;
+        d.ipPairKey = ipPairKey;
+        // d.ipPairs intentionally NOT populated as a default per-item array — at scale
+        // the single-element `[{...}]` fallback allocates millions of wrapper arrays.
+        // Downstream consumers that need ipPairs check for its presence first.
+        d._idx = i;
+    }
 
     // --- Flag separation: spread co-located flag circles vertically ---
     if (separateFlags) {

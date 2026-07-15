@@ -57,7 +57,7 @@ export function createTooltipHTML(data) {
         return tooltipContent;
     } else {
         // Single packet tooltip
-        const packet = data.originalPackets ? data.originalPackets[0] : data;
+        const packet = (data.originalPackets && data.originalPackets.length) ? data.originalPackets[0] : data;
         const { utcTime } = formatTimestamp(packet.timestamp);
         let tooltipContent = `<b>${packet.flagType || packet.flag_type || classifyFlags(packet.flags)}</b><br>`;
 

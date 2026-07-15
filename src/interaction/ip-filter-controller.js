@@ -116,7 +116,6 @@ export function createIPFilterController(dependencies) {
                 adaptiveOverviewLoader,
                 selectedIPs,
                 refreshAdaptiveOverview,
-                updateTcpFlowStats,
                 calculateGroundTruthStats,
                 sbUpdateGroundTruthStatsUI,
                 eventColors
@@ -157,7 +156,7 @@ export function createIPFilterController(dependencies) {
 
             // Determine visualization mode
             const isFlowModeOnly = flowDataState &&
-                (flowDataState.format === 'chunked_flows' || flowDataState.format === 'chunked_flows_by_ip_pair') &&
+                flowDataState.format === 'flow_list_csv' &&
                 (!state.data.filtered || state.data.filtered.length === 0);
 
             console.log('[updateIPFilter] Visualization decision:', {
