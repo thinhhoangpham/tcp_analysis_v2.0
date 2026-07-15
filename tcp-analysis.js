@@ -7402,8 +7402,6 @@ function computeFirstDegreeNeighbors(originIPs, opts = {}) {
     return Array.from(result);
 }
 
-window.__computeFirstDegreeNeighbors = computeFirstDegreeNeighbors;
-
 // Set the global loadFromPath reference now that the function is defined
 window.loadFromPath = loadFromPath;
 

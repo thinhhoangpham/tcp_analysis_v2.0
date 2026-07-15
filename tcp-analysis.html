@@ -74,6 +74,15 @@
             </div>
         </div>
         <div class="control-group">
+            <div id="viewModeToggle" style="margin-bottom: 8px; padding: 6px 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;">
+                <span style="font-size: 11px; font-weight: bold; color: #495057; margin-right: 8px;">View Mode:</span>
+                <label style="font-size: 11px; margin-right: 10px; cursor: pointer;">
+                    <input type="radio" name="viewMode" value="packets" checked style="margin-right: 3px;">Packets
+                </label>
+                <label style="font-size: 11px; cursor: pointer;">
+                    <input type="radio" name="viewMode" value="flows" style="margin-right: 3px;">Flows
+                </label>
+            </div>
             <label>TCP Flags</label>
             <div id="flagStats" style="min-width: 200px; border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px; font-size: 12px;">
                 <div style="color: #666;">No data loaded</div>
@@ -87,12 +96,16 @@
                 Sub-row Arcs
             </label>
             <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
-                <input type="checkbox" id="separateFlags" style="margin-right: 6px;" title="Spread overlapping flag circles vertically">
-                Separate Flags
+                <input type="checkbox" id="separateFlags" style="margin-right: 6px;" title="Spread overlapping bins vertically">
+                Separate Bins
             </label>
             <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
                 <input type="checkbox" id="showFlowThreading" style="margin-right: 6px;" checked title="Auto-draw flow threading lines at raw packet resolution">
                 Flow Threading
+            </label>
+            <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
+                <input type="checkbox" id="addNeighbors" style="margin-right: 6px;" title="Add each selected IP's top-50 first-degree neighbors (by packet count)">
+                Add first-degree neighbors
             </label>
         </div>
         <div class="control-group collapsible collapsed">
