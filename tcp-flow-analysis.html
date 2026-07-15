@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>TCP Flow Analysis</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="tcp-analysis.css">
+    <link rel="stylesheet" href="src/ui/pattern-builder-popup.css">
+</head>
+<body>
+    <div id="main-layout">
+      <!-- Packet View: main packet visualization (stacked circles, arcs, time axis) -->
+      <div id="chart-column">
+        <!-- Packet View inner container -->
+        <div id="chart-container">
+            <div id="chart"></div>
+            <div id="loadingMessage"></div>
+            <!-- CSV/data loading progress bar (driven by control-panel.js) -->
+            <div id="csvProgress" style="display: none;">
+                <div id="csvProgressLabel">Loading...</div>
+                <div class="csv-progress-track">
+                    <div id="csvProgressBar" class="csv-progress-bar"></div>
+                </div>
+            </div>
+        </div>
+        <!-- Packet View bottom overlay: timeline axis + size/flag legends -->
+        <div id="chart-bottom-overlay">
+            <svg id="chart-bottom-overlay-svg"></svg>
+        </div>
+        <!-- Overview Bar chart: stacked flow bars at bottom, brush-navigable time range -->
+        <div id="overview-container" style="display: none;">
+            <div style="text-align: center; margin-bottom: 5px; color: #6c757d; font-size: 12px; font-weight: bold;">
+                Timeline Overview - Drag to Navigate
+            </div>
+            <div id="overview-chart"></div>
+        </div>
+      </div>
+    </div><!-- end #main-layout -->
+    <!-- Control Panel: floating draggable panel with IP selection, legends, and view controls -->
+    <aside id="control-panel">
+        <div id="control-panel-drag-handle">
+            <span class="control-panel-title">Control Panel</span>
+            <span id="control-panel-collapse-icon">&#x25BC;</span>
+        </div>
+        <!-- Zoom controls — attached above the panel -->
+        <div id="zoomControlsSection">
+            <div id="zoomControlsOverlay">
+                <div id="zoomIndicator">
+                    <div id="zoomTimeRange">-</div>
+                    <select id="zoomResolution" title="Resolution level - Auto follows zoom, or select manually">
+                        <option value="auto">Auto</option>
+                    </select>
+                    <div id="currentResolutionIndicator" title="Currently active resolution">
+                        <span id="currentResolutionLabel">-</span>
+                    </div>
+                </div>
+                <div id="zoomButtonsGroup">
+                    <button id="zoomInBtn" title="Zoom in">+</button>
+                    <button id="zoomOutBtn" title="Zoom out">−</button>
+                </div>
+            </div>
+        </div>
+        <div class="controls">
+        <div class="control-group">
+            <label>IP Addresses</label>
+            <div id="ipSelector" style="border: 1px solid #dee2e6; padding: 7px; background: white; border-radius: 4px;">
+                <div style="margin-bottom: 6px;">
+                    <input type="text" id="ipSearch" placeholder="Search IP addresses..." style="width: 100%; padding: 3px 5px; margin-bottom: 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px;">
+                    <button id="selectAllIPs" class="cp-btn" style="margin-right: 6px;">Select All</button>
+                    <button id="clearAllIPs" class="cp-btn">Clear All</button>
+                </div>
+                <div id="ipCheckboxes" style="max-height: 160px; overflow-y: auto;"></div>
+            </div>
+        </div>
+        <div class="control-group">
+            <div id="viewModeToggle" style="margin-bottom: 8px; padding: 6px 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;">
+                <span style="font-size: 11px; font-weight: bold; color: #495057; margin-right: 8px;">View Mode:</span>
+                <label style="font-size: 11px; margin-right: 10px; cursor: pointer;">
+                    <input type="radio" name="viewMode" value="packets" style="margin-right: 3px;">Packets
+                </label>
+                <label style="font-size: 11px; cursor: pointer;">
+                    <input type="radio" name="viewMode" value="flows" checked style="margin-right: 3px;">Flows
+                </label>
+            </div>
+            <label>TCP Flags</label>
+            <div id="flagStats" style="min-width: 200px; border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px; font-size: 12px;">
+                <div style="color: #666;">No data loaded</div>
+            </div>
+            <label style="margin-top:4px;">Packet Count</label>
+            <div id="sizeLegend" style="border: 1px solid #dee2e6; padding: 8px; background: white; border-radius: 4px; font-size: 12px;">
+                <div style="color: #666;">No data loaded</div>
+            </div>
+            <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
+                <input type="checkbox" id="showSubRowArcs" style="margin-right: 6px;" title="Show permanent arcs connecting IP pair sub-rows">
+                Sub-row Arcs
+            </label>
+            <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
+                <input type="checkbox" id="separateFlags" style="margin-right: 6px;" title="Spread overlapping bins vertically">
+                Separate Bins
+            </label>
+            <label style="display: flex; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer;">
+                <input type="checkbox" id="showFlowThreading" style="margin-right: 6px;" checked title="Auto-draw flow threading lines at raw packet resolution">
+                Flow Threading
+            </label>
+        </div>
+        <div class="control-group collapsible collapsed">
+            <label class="collapsible-header"><span>IP Statistics</span><span class="collapse-icon">&#x25BC;</span></label>
+            <div class="collapsible-body">
+                <div id="ipStats" style="min-width: 250px; max-height: 200px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px; font-size: 12px;">
+                    <div style="color: #666;">Select IPs to view statistics</div>
+                </div>
+            </div>
+        </div>
+        <div class="control-group collapsible collapsed">
+            <label class="collapsible-header"><span>TCP Flow Visualization</span><span class="collapse-icon">&#x25BC;</span></label>
+            <div class="collapsible-body">
+                <div style="border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px; font-size: 12px;">
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <input type="checkbox" id="showTcpFlows" style="margin-right: 8px;" checked>
+                        Show TCP Flow Packets
+                    </label>
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <input type="checkbox" id="showEstablishment" style="margin-right: 8px;" checked>
+                        Show Establishment Phase
+                    </label>
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <input type="checkbox" id="showDataTransfer" style="margin-right: 8px;" checked>
+                        Show Data Transfer Phase
+                    </label>
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <input type="checkbox" id="showClosing" style="margin-right: 8px;" checked>
+                        Show Closing Phase
+                    </label>
+                    <div id="tcpFlowStats" style="color: #666; font-size: 11px; margin-top: 10px;">
+                        No TCP flows detected
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="control-group collapsible collapsed">
+            <label class="collapsible-header"><span>Ground Truth Events</span><span class="collapse-icon">&#x25BC;</span></label>
+            <div class="collapsible-body">
+                <div style="border: 1px solid #dee2e6; padding: 10px; background: white; border-radius: 4px; font-size: 12px;">
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <input type="checkbox" id="showGroundTruth" style="margin-right: 8px;">
+                        Show Ground Truth Event Boxes
+                    </label>
+                    <div id="groundTruthStats" style="color: #666; font-size: 11px; margin-top: 5px;">
+                        Loading ground truth data...
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="control-group" id="patternSearchGroup">
+            <button id="openPatternBuilder" type="button">
+                <span>Flow Pattern Search</span>
+                <span id="patternBuilderStatus"></span>
+            </button>
+        </div>
+        <button id="resetView" class="cp-btn">Reset View</button>
+        </div>
+      </aside>
+    <div id="tooltip" class="tooltip" style="display: none;"></div>
+    <!-- Flow List Modal -->
+    <div id="flowListModalOverlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="flowListModalTitle">
+        <div class="modal" id="flowListModal">
+            <div class="modal-header">
+                <h3 id="flowListModalTitle">Flows</h3>
+                <div id="flowListModalCount" style="margin-left:auto; color:#6c757d; font-size:12px;"></div>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom:8px; display:flex; gap:8px; align-items:center;">
+                    <input type="text" id="flowListModalSearch" placeholder="Search flows..." style="flex:1; padding:6px; border:1px solid #ced4da; border-radius:4px;">
+                    <button id="flowListModalSelectAll" class="cp-btn cp-btn-primary" title="Select all flows in this list">Select All</button>
+                    <button id="flowListModalClearAll" class="cp-btn" title="Clear selection for this list">Clear All</button>
+                </div>
+                <div id="flowListModalList" style="max-height:60vh; overflow:auto; border:1px solid #e9ecef; border-radius:6px; padding:6px; background:#fff;"></div>
+            </div>
+            <div class="modal-actions">
+                <button id="flowListModalClose" class="cp-btn">Close</button>
+            </div>
+        </div>
+    </div>
+    <div id="patternBuilderPopup" class="pb-hidden"></div>
+    <script type="module">
+        const cacheBust = `?v=${Date.now()}`;
+        const mod = await import(`./tcp-flow-analysis.js${cacheBust}`);
+        if (mod.init) mod.init();
+        const folder = await import(`./folder_integration.js${cacheBust}`);
+        if (folder.initFolderIntegration) folder.initFolderIntegration();
+    </script>
+</body>
+</html>
