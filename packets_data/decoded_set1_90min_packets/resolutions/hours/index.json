@@ -1,0 +1,18 @@
+{
+  "resolution": "hours",
+  "resolution_microseconds": 3600000000,
+  "total_count": 8001050,
+  "time_range": {
+    "start": 1257253200000000,
+    "end": 1257256800000000
+  },
+  "chunks": [
+    {
+      "file": "chunk_000000.parquet",
+      "index": 0,
+      "start": 1257253200000000,
+      "end": 1257256800000000,
+      "count": 8001050
+    }
+  ]
+}

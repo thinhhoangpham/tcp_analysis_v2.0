@@ -1,0 +1,39 @@
+{
+  "resolution": "1ms",
+  "resolution_microseconds": 1000,
+  "total_count": 20011885,
+  "time_range": {
+    "start": 1257254615805000,
+    "end": 1257260015804000
+  },
+  "chunks": [
+    {
+      "file": "chunk_000000.parquet",
+      "index": 0,
+      "start": 1257254615805000,
+      "end": 1257256479443000,
+      "count": 6801584
+    },
+    {
+      "file": "chunk_000001.parquet",
+      "index": 1,
+      "start": 1257256479443000,
+      "end": 1257258184435000,
+      "count": 6345442
+    },
+    {
+      "file": "chunk_000002.parquet",
+      "index": 2,
+      "start": 1257258184435000,
+      "end": 1257259893472000,
+      "count": 6388376
+    },
+    {
+      "file": "chunk_000003.parquet",
+      "index": 3,
+      "start": 1257259893472000,
+      "end": 1257260015804000,
+      "count": 476483
+    }
+  ]
+}
