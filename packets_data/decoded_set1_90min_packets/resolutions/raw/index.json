@@ -1,0 +1,151 @@
+{
+  "resolution": "raw",
+  "resolution_microseconds": 1,
+  "total_count": 125682278,
+  "time_range": {
+    "start": 1257254615805569,
+    "end": 1257260015804551
+  },
+  "chunks": [
+    {
+      "file": "chunk_000000.parquet",
+      "index": 0,
+      "start": 1257254615805569,
+      "end": 1257254970491302,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000001.parquet",
+      "index": 1,
+      "start": 1257254970491314,
+      "end": 1257255272705556,
+      "count": 6000000
+    },
+    {
+      "file": "chunk_000002.parquet",
+      "index": 2,
+      "start": 1257255272705557,
+      "end": 1257255555922363,
+      "count": 6000000
+    },
+    {
+      "file": "chunk_000003.parquet",
+      "index": 3,
+      "start": 1257255555922364,
+      "end": 1257255862213244,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000004.parquet",
+      "index": 4,
+      "start": 1257255862213256,
+      "end": 1257256154799596,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000005.parquet",
+      "index": 5,
+      "start": 1257256154799599,
+      "end": 1257256402379447,
+      "count": 6000000
+    },
+    {
+      "file": "chunk_000006.parquet",
+      "index": 6,
+      "start": 1257256402379450,
+      "end": 1257256641477821,
+      "count": 6000000
+    },
+    {
+      "file": "chunk_000007.parquet",
+      "index": 7,
+      "start": 1257256641477827,
+      "end": 1257256910905346,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000008.parquet",
+      "index": 8,
+      "start": 1257256910905350,
+      "end": 1257257175609841,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000009.parquet",
+      "index": 9,
+      "start": 1257257175609844,
+      "end": 1257257466244976,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000010.parquet",
+      "index": 10,
+      "start": 1257257466244986,
+      "end": 1257257734986046,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000011.parquet",
+      "index": 11,
+      "start": 1257257734986050,
+      "end": 1257257992323549,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000012.parquet",
+      "index": 12,
+      "start": 1257257992323562,
+      "end": 1257258243473375,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000013.parquet",
+      "index": 13,
+      "start": 1257258243473380,
+      "end": 1257258501298109,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000014.parquet",
+      "index": 14,
+      "start": 1257258501298121,
+      "end": 1257258759022662,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000015.parquet",
+      "index": 15,
+      "start": 1257258759022666,
+      "end": 1257259019352799,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000016.parquet",
+      "index": 16,
+      "start": 1257259019352809,
+      "end": 1257259329090299,
+      "count": 6000000
+    },
+    {
+      "file": "chunk_000017.parquet",
+      "index": 17,
+      "start": 1257259329093074,
+      "end": 1257259579866242,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000018.parquet",
+      "index": 18,
+      "start": 1257259579866243,
+      "end": 1257259834427610,
+      "count": 6500000
+    },
+    {
+      "file": "chunk_000019.parquet",
+      "index": 19,
+      "start": 1257259834427614,
+      "end": 1257260015804551,
+      "count": 4682278
+    }
+  ]
+}
