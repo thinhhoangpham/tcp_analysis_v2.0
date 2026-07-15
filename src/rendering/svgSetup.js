@@ -176,7 +176,8 @@ export function renderIPRowLabels(options) {
         ipPairOrderByRow = null,
         ipRowHeights = null,
         subRowHeights = null,
-        subRowOffsets = null
+        subRowOffsets = null,
+        originIPs = null
     } = options;
 
     // Create row highlight rectangles (behind everything)
@@ -208,7 +209,7 @@ export function renderIPRowLabels(options) {
         .attr('x', -10)
         .attr('dy', '.35em')
         .attr('text-anchor', 'end')
-        .text(d => d)
+        .text(d => (originIPs && originIPs.has(d)) ? `● ${d}` : d)
         .on('mouseover', (e, d) => {
             if (onHighlight) {
                 try {
