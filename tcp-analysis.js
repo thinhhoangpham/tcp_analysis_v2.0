@@ -7354,6 +7354,55 @@ function extractUniqueIPsFromPackets(packets) {
     return Array.from(ips).sort();
 }
 
+/**
+ * Compute first-degree neighbors of the given origin IPs from the unfiltered
+ * loaded bins (state.data.full), ranked by total packet count per origin IP,
+ * capped at topN per origin, unioned, and de-duplicated against origin IPs and
+ * excludeIPs.
+ *
+ * @param {Set<string>|string[]} originIPs
+ * @param {{topN?:number, timeExtent?:[number,number]|null, excludeIPs?:Set<string>|null}} [opts]
+ * @returns {string[]} neighbor IPs to add
+ */
+function computeFirstDegreeNeighbors(originIPs, opts = {}) {
+    const { topN = 50, timeExtent = null, excludeIPs = null } = opts;
+    const origins = originIPs instanceof Set ? originIPs : new Set(originIPs);
+    const packets = state.data.full || [];
+    const [tMin, tMax] = timeExtent || [-Infinity, Infinity];
+
+    // originIP -> Map<neighborIP, totalPacketCount>
+    const perOrigin = new Map();
+    for (const p of packets) {
+        if (!p || !p.src_ip || !p.dst_ip) continue;
+        if (p.timestamp < tMin || p.timestamp > tMax) continue;
+        const s = p.src_ip, d = p.dst_ip;
+        const cnt = p.count || 1;
+        if (origins.has(s) && s !== d) {
+            let m = perOrigin.get(s); if (!m) { m = new Map(); perOrigin.set(s, m); }
+            m.set(d, (m.get(d) || 0) + cnt);
+        }
+        if (origins.has(d) && s !== d) {
+            let m = perOrigin.get(d); if (!m) { m = new Map(); perOrigin.set(d, m); }
+            m.set(s, (m.get(s) || 0) + cnt);
+        }
+    }
+
+    const exclude = new Set(origins);
+    if (excludeIPs) for (const ip of excludeIPs) exclude.add(ip);
+
+    const result = new Set();
+    for (const [, neighborCounts] of perOrigin) {
+        const ranked = Array.from(neighborCounts.entries())
+            .filter(([ip]) => !exclude.has(ip))
+            .sort((a, b) => b[1] - a[1])   // by packet count desc
+            .slice(0, topN);
+        for (const [ip] of ranked) result.add(ip);
+    }
+    return Array.from(result);
+}
+
+window.__computeFirstDegreeNeighbors = computeFirstDegreeNeighbors;
+
 // Set the global loadFromPath reference now that the function is defined
 window.loadFromPath = loadFromPath;
 
