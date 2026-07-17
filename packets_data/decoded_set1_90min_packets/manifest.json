@@ -1,9 +1,10 @@
 {
   "version": "3.5",
   "format": "multires_packets",
-  "created": "2026-04-28T18:35:17.598488",
+  "created": "2026-07-16T21:17:36.475843",
   "source_file": "decoded_set1_90min.csv",
   "total_packets": 125682278,
+  "missing_protocol_count": 0,
   "unique_ips": 19666,
   "target_chunk_mb": 50.0,
   "time_range": {
