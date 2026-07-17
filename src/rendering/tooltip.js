@@ -17,6 +17,16 @@ export function createTooltipHTML(data) {
         return normalizeProtocolValue(raw, PROTOCOL_MAP);
     }
 
+    function protocolFromFlagType(ft) {
+        // Non-TCP bins carry the protocol in flagType (UDP, ICMP, PROTO_<n>, ...).
+        // TCP bins carry a TCP-flag label (SYN, ACK, PSH+ACK, NONE, ...) -> protocol is TCP.
+        const NON_TCP = new Set(['UDP', 'ICMP', 'IGMP', 'GRE', 'ESP', 'AH', 'ICMPv6']);
+        if (!ft) return 'TCP';
+        if (NON_TCP.has(ft)) return ft;                 // show label as-is
+        if (/^PROTO_\d+$/.test(ft)) return ft;          // show PROTO_<n> as-is
+        return 'TCP';                                    // any TCP-flag label -> TCP
+    }
+
     if (data.binned && data.bin_start != null) {
         // Binned data tooltip
         const { utcTime } = formatTimestamp(data.timestamp);
@@ -36,7 +46,7 @@ export function createTooltipHTML(data) {
             const protocols = Array.from(new Set(data.originalPackets.map(extractProtocol)));
             tooltipContent += `Protocol: ${protocols.join(', ')}<br>`;
         } else {
-            tooltipContent += `Protocol: ${extractProtocol(data)}<br>`;
+            tooltipContent += `Protocol: ${protocolFromFlagType(data.flagType)}<br>`;
         }
 
         tooltipContent += `Time Bin: ${utcTime}<br>`;
